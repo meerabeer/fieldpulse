@@ -183,6 +183,18 @@ export default function HomePage() {
     );
   });
 
+  const areas = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          nfos
+            .map((row) => row.home_location)
+            .filter((x): x is string => !!x && x.trim() !== "")
+        )
+      ),
+    [nfos]
+  );
+
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-8">
       <div className="max-w-5xl mx-auto space-y-6">
