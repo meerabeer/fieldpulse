@@ -180,7 +180,9 @@ export default function HomePage() {
                     </td>
                     <td className="py-2 px-2">{nfo.status}</td>
                     <td className="py-2 px-2">{nfo.activity}</td>
-                    <td className="py-2 px-2">{nfo.site_id}</td>
+                    <td className="py-2 px-2 font-mono text-xs">
+                      {nfo.site_id ?? "-"}
+                    </td>
                     <td className="py-2 px-2 text-xs text-gray-500">
                       {nfo.last_active_at
                         ? new Date(nfo.last_active_at).toLocaleString()
