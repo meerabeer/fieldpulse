@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { supabase } from "../lib/supabaseClient";
 
 type NfoStatusRow = {
@@ -10,6 +10,7 @@ type NfoStatusRow = {
   status: string | null;
   activity: string | null;
   site_id: string | null;
+  home_location: string | null;
   lat: number | null;
   lng: number | null;
   logged_in: boolean | null;
@@ -24,15 +25,23 @@ type Stats = {
   busy: number;
 };
 
+type StatusFilter =
+  | "all"
+  | "onshift"
+  | "offshift"
+  | "busy"
+  | "free"
+  | "online"
+  | "offline";
+
 export default function HomePage() {
   const [nfos, setNfos] = useState<NfoStatusRow[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<"all" | "busy" | "free">(
-    "all"
-  );
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [areaFilter, setAreaFilter] = useState<string>("all");
   const [onShiftOnly, setOnShiftOnly] = useState(false);
 
   useEffect(() => {
@@ -42,7 +51,7 @@ export default function HomePage() {
         const { data, error } = await supabase
           .from("nfo_status")
           .select(
-            "username, name, on_shift, status, activity, site_id, lat, lng, logged_in, last_active_at"
+            "username, name, on_shift, status, activity, site_id, lat, lng, logged_in, last_active_at, home_location"
           )
           .order("last_active_at", { ascending: false });
 
@@ -122,16 +131,57 @@ export default function HomePage() {
       row.username.toLowerCase().includes(term) ||
       (row.name ?? "").toLowerCase().includes(term);
 
+    let matchesStatus = true;
     const s = (row.status ?? "").toLowerCase();
-    const matchesStatus =
-      statusFilter === "all" ||
-      (statusFilter === "busy" && s === "busy") ||
-      (statusFilter === "free" && s === "free");
+    const loggedIn = !!row.logged_in;
+    const onShift = !!row.on_shift;
 
-    const matchesOnShift = !onShiftOnly || !!row.on_shift;
+    switch (statusFilter) {
+      case "busy":
+        matchesStatus = s === "busy";
+        break;
+      case "free":
+        matchesStatus = s === "free";
+        break;
+      case "online":
+        matchesStatus = loggedIn;
+        break;
+      case "offline":
+        matchesStatus = !loggedIn;
+        break;
+      case "onshift":
+        matchesStatus = onShift;
+        break;
+      case "offshift":
+        matchesStatus = !onShift;
+        break;
+      default:
+        matchesStatus = true;
+    }
 
-    return matchesSearch && matchesStatus && matchesOnShift;
+    const matchesArea = areaFilter === "all" || row.home_location === areaFilter;
+
+    const matchesOnShiftToggle = !onShiftOnly || onShift;
+
+    return (
+      matchesSearch &&
+      matchesStatus &&
+      matchesArea &&
+      matchesOnShiftToggle
+    );
   });
+
+  const areas = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          nfos
+            .map((row) => row.home_location)
+            .filter((x): x is string => !!x && x.trim() !== "")
+        )
+      ),
+    [nfos]
+  );
 
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-8">
@@ -190,13 +240,29 @@ export default function HomePage() {
             <select
               value={statusFilter}
               onChange={(e) =>
-                setStatusFilter(e.target.value as "all" | "busy" | "free")
+                setStatusFilter(e.target.value as StatusFilter)
               }
               className="border rounded-md px-2 py-1 text-sm"
             >
               <option value="all">All statuses</option>
+              <option value="onshift">On shift</option>
+              <option value="offshift">Off shift</option>
               <option value="busy">Busy</option>
               <option value="free">Free</option>
+              <option value="online">Online</option>
+              <option value="offline">Offline</option>
+            </select>
+            <select
+              value={areaFilter}
+              onChange={(e) => setAreaFilter(e.target.value)}
+              className="border rounded-md px-2 py-1 text-sm"
+            >
+              <option value="all">All areas</option>
+              {areas.map((area) => (
+                <option key={area} value={area}>
+                  {area}
+                </option>
+              ))}
             </select>
             <label className="inline-flex items-center gap-1 text-sm">
               <input
