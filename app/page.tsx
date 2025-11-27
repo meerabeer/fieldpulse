@@ -29,6 +29,11 @@ export default function HomePage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "busy" | "free">(
+    "all"
+  );
+  const [onShiftOnly, setOnShiftOnly] = useState(false);
 
   useEffect(() => {
     const loadData = async () => {
@@ -109,6 +114,25 @@ export default function HomePage() {
     );
   }
 
+  const filteredNfos = nfos.filter((row) => {
+    const term = search.trim().toLowerCase();
+
+    const matchesSearch =
+      term === "" ||
+      row.username.toLowerCase().includes(term) ||
+      (row.name ?? "").toLowerCase().includes(term);
+
+    const s = (row.status ?? "").toLowerCase();
+    const matchesStatus =
+      statusFilter === "all" ||
+      (statusFilter === "busy" && s === "busy") ||
+      (statusFilter === "free" && s === "free");
+
+    const matchesOnShift = !onShiftOnly || !!row.on_shift;
+
+    return matchesSearch && matchesStatus && matchesOnShift;
+  });
+
   return (
     <main className="min-h-screen bg-slate-50 px-4 py-8">
       <div className="max-w-5xl mx-auto space-y-6">
@@ -155,6 +179,34 @@ export default function HomePage() {
           <h2 className="text-lg font-semibold mb-3">
             Field engineers (latest status per username)
           </h2>
+          <div className="flex flex-wrap items-center gap-3 mb-4 text-sm">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by username or name"
+              className="border rounded-md px-3 py-1 text-sm"
+            />
+            <select
+              value={statusFilter}
+              onChange={(e) =>
+                setStatusFilter(e.target.value as "all" | "busy" | "free")
+              }
+              className="border rounded-md px-2 py-1 text-sm"
+            >
+              <option value="all">All statuses</option>
+              <option value="busy">Busy</option>
+              <option value="free">Free</option>
+            </select>
+            <label className="inline-flex items-center gap-1 text-sm">
+              <input
+                type="checkbox"
+                checked={onShiftOnly}
+                onChange={(e) => setOnShiftOnly(e.target.checked)}
+              />
+              <span>On shift only</span>
+            </label>
+          </div>
           <div className="overflow-x-auto">
             <table className="min-w-full text-sm">
               <thead>
@@ -169,7 +221,7 @@ export default function HomePage() {
                 </tr>
               </thead>
               <tbody>
-                {nfos.map((nfo) => (
+                {filteredNfos.map((nfo) => (
                   <tr key={nfo.username} className="border-b last:border-b-0">
                     <td className="py-2 px-2 font-mono text-xs">
                       {nfo.username}
@@ -180,7 +232,9 @@ export default function HomePage() {
                     </td>
                     <td className="py-2 px-2">{nfo.status}</td>
                     <td className="py-2 px-2">{nfo.activity}</td>
-                    <td className="py-2 px-2">{nfo.site_id}</td>
+                    <td className="py-2 px-2 font-mono text-xs">
+                      {nfo.site_id?.trim() ? nfo.site_id : "-"}
+                    </td>
                     <td className="py-2 px-2 text-xs text-gray-500">
                       {nfo.last_active_at
                         ? new Date(nfo.last_active_at).toLocaleString()
