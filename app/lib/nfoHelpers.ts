@@ -185,3 +185,54 @@ export function isOnline(
   const age = now - parsed;
   return age <= ACTIVE_WINDOW_MS;
 }
+
+// ============================================================================
+// Ping Status (Not Active Detection)
+// ============================================================================
+
+const STALE_MINUTES = 30;
+
+export type PingStatus = {
+  isNotActive: boolean;
+  pingReason: string;
+};
+
+/**
+ * Compute ping status based on last_active_at timestamp.
+ * An NFO is considered "Not Active" if no ping for > 30 minutes.
+ * This is separate from on_shift/status logic - purely derived from last_active_at.
+ */
+export function computePingStatus(
+  lastActiveAt: string | null,
+  now: number = Date.now()
+): PingStatus {
+  if (!lastActiveAt) {
+    return {
+      isNotActive: true,
+      pingReason: "No last active time recorded",
+    };
+  }
+
+  const parsed = Date.parse(lastActiveAt);
+  if (!Number.isFinite(parsed)) {
+    return {
+      isNotActive: true,
+      pingReason: "Invalid timestamp",
+    };
+  }
+
+  const diffMs = now - parsed;
+  const diffMinutes = diffMs / (1000 * 60);
+
+  if (diffMinutes > STALE_MINUTES) {
+    return {
+      isNotActive: true,
+      pingReason: `No ping for ${Math.floor(diffMinutes)} min`,
+    };
+  }
+
+  return {
+    isNotActive: false,
+    pingReason: "OK",
+  };
+}

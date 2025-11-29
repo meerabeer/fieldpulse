@@ -12,6 +12,7 @@ import {
   isOnline,
   ageMinutes,
   formatDistanceLabel,
+  computePingStatus,
 } from "./lib/nfoHelpers";
 import LiveMap from "./components/LiveMap";
 import NfoRoutesView from "./components/NfoRoutesView";
@@ -26,6 +27,8 @@ type EnrichedNfo = NfoStatusRow & {
   nearestSiteDistanceKm: number | null;
   distanceLabel: string;
   siteLabel: string;
+  isNotActive: boolean;
+  pingReason: string;
 };
 
 type Stats = {
@@ -53,7 +56,8 @@ type StatusFilter =
   | "busy"
   | "free"
   | "online"
-  | "offline";
+  | "offline"
+  | "notactive";
 
 type View = "dashboard" | "map" | "routes" | "settings";
 
@@ -282,6 +286,12 @@ export default function HomePage() {
           case "offshift":
             matchesStatus = !onShift;
             break;
+          case "notactive": {
+            // Check if NFO is not active (no ping > 30 min)
+            const { isNotActive } = computePingStatus(row.last_active_at);
+            matchesStatus = isNotActive;
+            break;
+          }
           default:
             matchesStatus = true;
         }
@@ -404,6 +414,9 @@ export default function HomePage() {
         });
       }
 
+      // Compute ping status (not active if no ping > 30 min)
+      const { isNotActive, pingReason } = computePingStatus(nfo.last_active_at);
+
       return {
         ...nfo,
         isOnline: online,
@@ -413,6 +426,8 @@ export default function HomePage() {
         nearestSiteDistanceKm,
         distanceLabel,
         siteLabel,
+        isNotActive,
+        pingReason,
       };
     });
   }, [nfos, sites]);
@@ -521,6 +536,11 @@ export default function HomePage() {
                 value={stats?.busy ?? 0}
                 accent="bg-blue-400"
               />
+              <StatCard
+                label="Not Active (>30m)"
+                value={enrichedNfos.filter((n) => n.isNotActive).length}
+                accent="bg-yellow-500"
+              />
             </div>
 
             {/* Stuck at site > 2.5 hours panel */}
@@ -626,6 +646,7 @@ export default function HomePage() {
                   <option value="free">Free</option>
                   <option value="online">Online</option>
                   <option value="offline">Offline</option>
+                  <option value="notactive">Not Active (&gt;30m)</option>
                 </select>
                 <select
                   value={areaFilter}
@@ -648,6 +669,7 @@ export default function HomePage() {
                       <th className="text-left py-2 px-2">Name</th>
                       <th className="text-left py-2 px-2">On shift</th>
                       <th className="text-left py-2 px-2">Status</th>
+                      <th className="text-left py-2 px-2">Ping Status</th>
                       <th className="text-left py-2 px-2">Activity</th>
                       <th className="text-left py-2 px-2">Site ID</th>
                       <th className="text-left py-2 px-2">Nearest site</th>
@@ -669,6 +691,17 @@ export default function HomePage() {
                             {nfo.on_shift ? "Yes" : "No"}
                           </td>
                           <td className="py-2 px-2">{nfo.status}</td>
+                          <td className="py-2 px-2">
+                            {enriched.isNotActive ? (
+                              <div>
+                                <span className="text-red-600 font-semibold">Not Active</span>
+                                <br />
+                                <span className="text-xs text-gray-500">{enriched.pingReason}</span>
+                              </div>
+                            ) : (
+                              <span className="text-green-600">OK</span>
+                            )}
+                          </td>
                           <td className="py-2 px-2">{nfo.activity}</td>
                           <td className="py-2 px-2 font-mono text-xs">
                             {nfo.site_id?.trim() ? nfo.site_id : "-"}
