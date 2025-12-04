@@ -5,19 +5,7 @@ import { MapContainer, Marker, Polyline, Popup, TileLayer } from "react-leaflet"
 import L from "leaflet";
 import { supabase } from "../../lib/supabaseClient";
 import { parseCoords } from "../lib/geoHelpers";
-
-type NfoStatusRow = {
-  username: string;
-  name: string | null;
-  status: string | null;
-  activity: string | null;
-  site_id: string | null;
-  lat: number | null;
-  lng: number | null;
-  logged_in: boolean | null;
-  last_active_at: string | null;
-  home_location: string | null;
-};
+import { type NfoStatusRow, computeAssignmentState } from "../lib/nfoHelpers";
 
 type SiteCoordinate = {
   site_id: string;
@@ -85,7 +73,9 @@ export default function NfoRoutesViewInner({ nfos }: NfoRoutesViewProps) {
     if (!selectedUsername) return;
 
     const nfo = nfos.find((n) => n.username === selectedUsername);
-    if (nfo && nfo.status === "busy" && nfo.site_id && !selectedSiteId) {
+    // Use new assignment-based busy logic
+    const { isBusy } = nfo ? computeAssignmentState(nfo) : { isBusy: false };
+    if (nfo && isBusy && nfo.site_id && !selectedSiteId) {
       setSelectedSiteId(nfo.site_id);
     }
   }, [selectedUsername, nfos, selectedSiteId]);

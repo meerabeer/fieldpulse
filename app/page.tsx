@@ -13,6 +13,7 @@ import {
   ageMinutes,
   formatDistanceLabel,
   computePingStatus,
+  computeAssignmentState,
 } from "./lib/nfoHelpers";
 import LiveMap from "./components/LiveMap";
 import NfoRoutesView from "./components/NfoRoutesView";
@@ -40,7 +41,7 @@ const LS_KEYS = {
   searchTerm: "nfoDashboard.searchTerm",
   // Live Map state
   mapAreaFilter: "nfoDashboard.mapAreaFilter",   // "NFOs_ONLY", null (All Sites), or area name
-  mapNfoFilter: "nfoDashboard.mapNfoFilter",     // null (all), "free", "busy", "off-shift"
+  mapNfoFilter: "nfoDashboard.mapNfoFilter",     // null (all), "free", "busy", "on-shift", "off-shift"
 };
 
 type EnrichedNfo = NfoStatusRow & {
@@ -53,6 +54,11 @@ type EnrichedNfo = NfoStatusRow & {
   siteLabel: string;
   isNotActive: boolean;
   pingReason: string;
+  // Assignment state flags (computed from computeAssignmentState)
+  isBusy: boolean;
+  isFree: boolean;
+  isOnShift: boolean;
+  isOffShift: boolean;
 };
 
 type Stats = {
@@ -121,7 +127,7 @@ export default function HomePage() {
   // Live Map state (persisted so it survives tab switching and F5)
   // mapAreaFilter: "NFOs_ONLY" (default), null (All Sites), or specific area name
   const [mapAreaFilter, setMapAreaFilter] = useState<string | null>("NFOs_ONLY");
-  // mapNfoFilter: null (show all NFOs), "free", "busy", or "off-shift"
+  // mapNfoFilter: null (show all NFOs), "free", "busy", "on-shift", or "off-shift"
   const [mapNfoFilter, setMapNfoFilter] = useState<string | null>(null);
   
   // ============================================================
@@ -218,7 +224,7 @@ export default function HomePage() {
       const { data, error: nfoError } = await supabase
         .from("nfo_status")
         .select(
-          "username, name, on_shift, status, activity, site_id, lat, lng, logged_in, last_active_at, home_location"
+          "username, name, on_shift, status, activity, site_id, lat, lng, logged_in, last_active_at, home_location, via_warehouse, warehouse_name"
         )
         .order("last_active_at", { ascending: false });
 
@@ -312,9 +318,10 @@ export default function HomePage() {
           offShift += 1;
         }
 
-        const s = (row.status ?? "").toLowerCase();
-        if (s === "busy") busy += 1;
-        if (s === "free") free += 1;
+        // Use new assignment-based logic for Busy/Free
+        const { isBusy, isFree } = computeAssignmentState(row);
+        if (isBusy) busy += 1;
+        if (isFree) free += 1;
       }
 
       setNfos(current);
@@ -409,8 +416,9 @@ export default function HomePage() {
         summary.onShift += 1;
       }
 
-      const status = (row.status ?? "").toLowerCase();
-      if (status === "busy") {
+      // Use new assignment-based logic for Busy count
+      const { isBusy } = computeAssignmentState(row);
+      if (isBusy) {
         summary.busy += 1;
       }
     }
@@ -429,16 +437,16 @@ export default function HomePage() {
           (row.name ?? "").toLowerCase().includes(term);
 
         let matchesStatus = true;
-        const s = (row.status ?? "").toLowerCase();
         const loggedIn = !!row.logged_in;
         const onShift = !!row.on_shift;
+        const { isBusy, isFree } = computeAssignmentState(row);
 
         switch (statusFilter) {
           case "busy":
-            matchesStatus = s === "busy";
+            matchesStatus = isBusy;
             break;
           case "free":
-            matchesStatus = s === "free";
+            matchesStatus = isFree;
             break;
           case "online":
             matchesStatus = loggedIn;
@@ -521,9 +529,12 @@ export default function HomePage() {
       let distanceLabel = "N/A";
       let siteLabel = "N/A";
 
+      // Use new assignment-based busy/free and shift logic
+      const { isBusy, isFree, isOnShift, isOffShift } = computeAssignmentState(nfo);
+
       // If NFO is busy and has an assigned site with valid coords, use that
       if (
-        nfo.status === "busy" &&
+        isBusy &&
         nfo.site_id &&
         hasValidLocation({ lat: nfo.lat, lng: nfo.lng })
       ) {
@@ -558,7 +569,7 @@ export default function HomePage() {
           nearestSiteDistanceKm = nearest.distanceKm;
           distanceLabel = formatDistanceLabel(nearest.distanceKm);
 
-          if (nfo.status === "free" && nfo.on_shift) {
+          if (isFree && nfo.on_shift) {
             siteLabel = `Free near site ${nearestSiteId} - ${distanceLabel}`;
           } else {
             siteLabel = `Nearest site ${nearestSiteId} - ${distanceLabel}`;
@@ -594,6 +605,11 @@ export default function HomePage() {
         siteLabel,
         isNotActive,
         pingReason,
+        // Assignment state flags
+        isBusy,
+        isFree,
+        isOnShift,
+        isOffShift,
       };
     });
   }, [nfos, sites]);
@@ -957,6 +973,7 @@ export default function HomePage() {
             mapNfoFilter={mapNfoFilter}
             onMapAreaFilterChange={handleSetMapAreaFilter}
             onMapNfoFilterChange={handleSetMapNfoFilter}
+            isActive={activeView === "map"}
           />
         </div>
 

@@ -16,9 +16,11 @@ type LiveMapProps = {
   sites: SiteRecord[];
   // Persisted map state - controlled by parent
   mapAreaFilter: string | null;        // "NFOs_ONLY", null (All Sites), or specific area name
-  mapNfoFilter: string | null;         // null (all), "free", "busy", "off-shift"
+  mapNfoFilter: string | null;         // null (all), "free", "busy", "on-shift", "off-shift"
   onMapAreaFilterChange: (area: string | null) => void;
   onMapNfoFilterChange: (filter: string | null) => void;
+  // For Leaflet invalidateSize() - true when Live Map tab is active
+  isActive: boolean;
 };
 
 const LiveMapInner = dynamic(() => import("./LiveMapInner"), {

@@ -13,6 +13,7 @@ import {
   formatDistanceLabel,
   isOnline,
   ageMinutes,
+  computeAssignmentState,
 } from "../lib/nfoHelpers";
 
 const PAGE_SIZE = 1000;
@@ -31,9 +32,11 @@ type LiveMapInnerProps = {
   sites: SiteRecord[];
   // Persisted state - controlled by parent
   mapAreaFilter: string | null;        // "NFOs_ONLY", null (All Sites), or specific area name
-  mapNfoFilter: string | null;         // null (all), "free", "busy", "off-shift"
+  mapNfoFilter: string | null;         // null (all), "free", "busy", "on-shift", "off-shift"
   onMapAreaFilterChange: (area: string | null) => void;
   onMapNfoFilterChange: (filter: string | null) => void;
+  // For Leaflet invalidateSize() - true when Live Map tab is active
+  isActive: boolean;
 };
 
 // Site marker (blue)
@@ -80,10 +83,12 @@ const nfoOffIcon = L.icon({
 });
 
 function getNfoIcon(nfo: NfoStatusRow): L.Icon {
-  if (nfo.status === "busy") {
+  // Use new assignment-based logic for Busy/Free icons
+  const { isBusy, isFree } = computeAssignmentState(nfo);
+  if (isBusy) {
     return nfoBusyIcon;
   }
-  if (nfo.status === "free") {
+  if (isFree) {
     return nfoFreeIcon;
   }
   // off-shift, logged out, or unknown
@@ -225,27 +230,30 @@ function NfoSearch({ nfosWithCoords }: { nfosWithCoords: NfoStatusRow[] }) {
       {isOpen && searchTerm.trim() && (
         <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-48 overflow-y-auto z-50">
           {filteredNfos.length > 0 ? (
-            filteredNfos.map((nfo) => (
-              <button
-                key={nfo.username}
-                onClick={() => handleSelectNfo(nfo)}
-                className="w-full text-left px-3 py-2 hover:bg-green-50 border-b border-gray-100 last:border-b-0 transition-colors"
-              >
-                <div className="font-semibold text-green-700">
-                  {nfo.name || nfo.username}
-                </div>
-                <div className="text-gray-500 text-xs flex items-center gap-2">
-                  <span>{nfo.username}</span>
-                  <span>·</span>
-                  <span className={
-                    nfo.status === "free" ? "text-green-600" :
-                    nfo.status === "busy" ? "text-red-600" : "text-gray-500"
-                  }>
-                    {nfo.status || "unknown"}
-                  </span>
-                </div>
-              </button>
-            ))
+            filteredNfos.map((nfo) => {
+              // Use new assignment-based logic for status colors
+              const { isBusy, isFree } = computeAssignmentState(nfo);
+              const statusColor = isFree ? "text-green-600" : isBusy ? "text-red-600" : "text-gray-500";
+              const statusLabel = isFree ? "Free" : isBusy ? "Busy" : (nfo.status || "Off-Shift");
+              return (
+                <button
+                  key={nfo.username}
+                  onClick={() => handleSelectNfo(nfo)}
+                  className="w-full text-left px-3 py-2 hover:bg-green-50 border-b border-gray-100 last:border-b-0 transition-colors"
+                >
+                  <div className="font-semibold text-green-700">
+                    {nfo.name || nfo.username}
+                  </div>
+                  <div className="text-gray-500 text-xs flex items-center gap-2">
+                    <span>{nfo.username}</span>
+                    <span>·</span>
+                    <span className={statusColor}>
+                      {statusLabel}
+                    </span>
+                  </div>
+                </button>
+              );
+            })
           ) : (
             <div className="px-3 py-2 text-gray-500">No NFOs found</div>
           )}
@@ -323,6 +331,37 @@ function AreaFilter({
 }
 
 /**
+ * MapSizeFixer component - fixes Leaflet "container size changed while hidden" issue.
+ * 
+ * When the Live Map tab becomes active (or window is resized), we call map.invalidateSize()
+ * so Leaflet recalculates the container dimensions and renders tiles correctly.
+ */
+function MapSizeFixer({ active }: { active: boolean }) {
+  const map = useMap();
+
+  // Call invalidateSize when tab becomes active
+  useEffect(() => {
+    if (!map) return;
+    if (!active) return;
+    // Small timeout so layout has settled after tab switch
+    const id = setTimeout(() => {
+      map.invalidateSize();
+    }, 100);
+    return () => clearTimeout(id);
+  }, [map, active]);
+
+  // Also handle window resize events
+  useEffect(() => {
+    if (!map) return;
+    const handler = () => map.invalidateSize();
+    window.addEventListener("resize", handler);
+    return () => window.removeEventListener("resize", handler);
+  }, [map]);
+
+  return null;
+}
+
+/**
  * Map Center Control component - handles zoom to NFO or Site on click
  */
 function MapCenterControl() {
@@ -368,18 +407,27 @@ function MapLegend({
   selectedNfoFilter: string | null;
   onFilterChange: (filter: string | null) => void;
 }) {
-  // Count NFOs by status
+  // Count NFOs by status using assignment-based logic
   const counts = useMemo(() => {
-    const free = nfosWithCoords.filter(n => n.status === "free").length;
-    const busy = nfosWithCoords.filter(n => n.status === "busy").length;
-    const offShift = nfosWithCoords.filter(n => n.status !== "free" && n.status !== "busy").length;
-    return { free, busy, offShift, sites: sitesWithCoords.length };
+    let free = 0;
+    let busy = 0;
+    let onShift = 0;
+    let offShift = 0;
+    for (const n of nfosWithCoords) {
+      const { isBusy, isFree, isOnShift, isOffShift } = computeAssignmentState(n);
+      if (isFree) free += 1;
+      if (isBusy) busy += 1;
+      if (isOnShift) onShift += 1;
+      if (isOffShift) offShift += 1;
+    }
+    return { free, busy, onShift, offShift, sites: sitesWithCoords.length };
   }, [nfosWithCoords, sitesWithCoords]);
 
   const legendItems = [
     { id: null, label: "All NFOs", color: "#6366f1", count: nfosWithCoords.length },
     { id: "free", label: "NFO (Free)", color: "#52c41a", count: counts.free },
     { id: "busy", label: "NFO (Busy)", color: "#f5222d", count: counts.busy },
+    { id: "on-shift", label: "NFO (On-shift)", color: "#3b82f6", count: counts.onShift },
     { id: "off-shift", label: "NFO (Off-shift)", color: "#999", count: counts.offShift },
   ];
 
@@ -444,6 +492,7 @@ export default function LiveMapInner({
   mapNfoFilter,
   onMapAreaFilterChange,
   onMapNfoFilterChange,
+  isActive,
 }: LiveMapInnerProps) {
   // PERSISTED STATE (controlled by parent, survives tab switch and F5):
   // - mapAreaFilter: Area/site filter ("NFOs_ONLY", null for All Sites, or specific area)
@@ -568,9 +617,12 @@ export default function LiveMapInner({
       let selectedSiteArea: string | null = null;
       let selectedSiteDistanceKm: number | null = null;
 
+      // Use new assignment-based busy logic
+      const { isBusy } = computeAssignmentState(nfo);
+
       // 1a. If NFO is busy and has an assigned site with valid coords, use that
       if (
-        nfo.status === "busy" &&
+        isBusy &&
         nfo.site_id &&
         hasValidLocation({ lat: nfo.lat, lng: nfo.lng })
       ) {
@@ -639,9 +691,12 @@ export default function LiveMapInner({
       return enrichedNfos; // Show all
     }
     return enrichedNfos.filter((nfo) => {
-      if (mapNfoFilter === "free") return nfo.status === "free";
-      if (mapNfoFilter === "busy") return nfo.status === "busy";
-      if (mapNfoFilter === "off-shift") return nfo.status !== "free" && nfo.status !== "busy";
+      // Use assignment-based logic for filtering
+      const { isBusy, isFree, isOnShift, isOffShift } = computeAssignmentState(nfo);
+      if (mapNfoFilter === "free") return isFree;
+      if (mapNfoFilter === "busy") return isBusy;
+      if (mapNfoFilter === "on-shift") return isOnShift;
+      if (mapNfoFilter === "off-shift") return isOffShift;
       return true;
     });
   }, [enrichedNfos, mapNfoFilter]);
@@ -894,6 +949,10 @@ export default function LiveMapInner({
                 const hasValidCoords = hasValidLocation({ lat: item.nfo.lat, lng: item.nfo.lng });
                 const isActiveRoute = activeRoute?.nfoUsername === item.nfo.username;
                 const isLoading = routeLoading === item.nfo.username;
+                // Use new assignment-based logic for status color
+                const { isBusy, isFree } = computeAssignmentState(item.nfo);
+                const statusColor = isFree ? "#22c55e" : isBusy ? "#ef4444" : "#666";
+                const statusLabel = isFree ? "Free" : isBusy ? "Busy" : (item.nfo.status || "Off-Shift");
                 
                 return (
                 <div
@@ -937,9 +996,8 @@ export default function LiveMapInner({
                           <span style={{ margin: "0 4px" }}>·</span>
                           <span>Status: <span style={{ 
                             fontWeight: "500",
-                            color: item.nfo.status === "free" ? "#22c55e" : 
-                                   item.nfo.status === "busy" ? "#ef4444" : "#666"
-                          }}>{item.nfo.status || "unknown"}</span></span>
+                            color: statusColor
+                          }}>{statusLabel}</span></span>
                           <span style={{ margin: "0 4px" }}>·</span>
                           <span style={{ color: "#ff9800", fontWeight: "bold" }}>
                             ✈ {item.distance.toFixed(2)} km
@@ -1027,6 +1085,9 @@ export default function LiveMapInner({
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
 
+      {/* Fix Leaflet map size when tab becomes active or window resizes */}
+      <MapSizeFixer active={isActive} />
+
       {/* Map Center Control - handles zoom to NFO clicks */}
       <MapCenterControl />
 
@@ -1057,6 +1118,12 @@ export default function LiveMapInner({
         const minutesSinceActive = ageMinutes(enriched.last_active_at);
         const icon = getNfoIcon(enriched);
         const isSelectedNfo = selectedNfoUsername === enriched.username;
+        // Use assignment-based logic for popup labels
+        const { isBusy, isFree, isOnShift, isOffShift } = computeAssignmentState(enriched);
+        
+        // Derive display labels
+        const shiftLabel = isOnShift ? "On-shift" : isOffShift ? "Off-shift" : "Unknown";
+        const assignmentLabel = isBusy ? "Busy" : isFree ? "Free" : "Other";
 
         return (
           <Marker
@@ -1080,12 +1147,18 @@ export default function LiveMapInner({
                   {enriched.name && ` – ${enriched.name}`}
                 </div>
 
-                {/* Status and activity */}
-                <div>Status: {enriched.status ?? "-"}</div>
-                <div>Activity: {enriched.activity ?? "-"}</div>
-                <div className={enriched.on_shift ? "text-blue-600" : "text-orange-600"}>
-                  {enriched.on_shift ? "✅ On Shift" : "🔴 Off Shift"}
+                {/* Shift and Assignment status (new clear labels) */}
+                <div className={isOnShift ? "text-blue-600 font-semibold" : isOffShift ? "text-orange-600 font-semibold" : ""}>
+                  <strong>Shift:</strong> {shiftLabel}
                 </div>
+                <div className={isBusy ? "text-red-600 font-semibold" : isFree ? "text-green-600 font-semibold" : ""}>
+                  <strong>Assignment:</strong> {assignmentLabel}
+                </div>
+                
+                {/* Raw status and activity for reference */}
+                <div className="text-gray-500">Status: {enriched.status ?? "-"}</div>
+                <div className="text-gray-500">Activity: {enriched.activity ?? "-"}</div>
+                
                 {minutesSinceActive !== null && (
                   <div>
                     Last active: {Math.round(minutesSinceActive)} min ago
@@ -1096,7 +1169,7 @@ export default function LiveMapInner({
                 {enriched.selectedSiteId ? (
                   <div className="font-semibold text-blue-600 border-t pt-1 mt-1">
                     <div>
-                      {enriched.status === "busy" ? "📍 Selected site:" : "🧭 Nearest site:"}
+                      {isBusy ? "📍 Selected site:" : "🧭 Nearest site:"}
                     </div>
                     <div>
                       {enriched.selectedSiteId}

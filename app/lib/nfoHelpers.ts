@@ -46,11 +46,54 @@ export type NfoStatusRow = {
   logged_in: boolean | null;
   last_active_at: string | null;
   home_location: string | null;
+  via_warehouse: boolean | null;
+  warehouse_name: string | null;
 };
 
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Compute the assignment state (Busy/Free) and shift state (On-shift/Off-shift) for an NFO.
+ * 
+ * Business Rules:
+ * - isOnShift: on_shift === true AND status === "on-shift"
+ * - isOffShift: on_shift === false AND status === "off-shift"
+ * - isBusy: NFO is on shift AND has an activity AND has a site_id assigned
+ * - isFree: NFO is on shift AND has NO activity AND has NO site_id AND 
+ *           NOT assigned via warehouse AND has NO warehouse_name
+ * 
+ * These replace the old status-based logic since Android now always uses status="on-shift"
+ */
+export function computeAssignmentState(nfo: NfoStatusRow): { 
+  isBusy: boolean; 
+  isFree: boolean; 
+  isOnShift: boolean; 
+  isOffShift: boolean;
+} {
+  const status = (nfo.status ?? "").toLowerCase().trim();
+  const activity = (nfo.activity ?? "").trim();
+  const siteId = (nfo.site_id ?? "").trim();
+  const warehouseName = (nfo.warehouse_name ?? "").trim();
+  
+  // Shift status: derived from on_shift flag AND status string
+  const isOnShift = nfo.on_shift === true && status === "on-shift";
+  const isOffShift = nfo.on_shift === false && status === "off-shift";
+  
+  const hasActivity = activity !== "";
+  const hasSiteId = siteId !== "";
+  const hasWarehouseName = warehouseName !== "";
+  const viaWarehouse = nfo.via_warehouse === true;
+  
+  // Busy: on shift with an active assignment (has activity AND site_id)
+  const isBusy = isOnShift && hasActivity && hasSiteId;
+  
+  // Free: on shift but no assignment and not at warehouse
+  const isFree = isOnShift && !hasActivity && !hasSiteId && !viaWarehouse && !hasWarehouseName;
+  
+  return { isBusy, isFree, isOnShift, isOffShift };
+}
 
 export function hasValidLocation(loc?: LatLng | null): boolean {
   if (!loc) return false;

@@ -1,19 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-
-type NfoStatusRow = {
-  username: string;
-  name: string | null;
-  status: string | null;
-  activity: string | null;
-  site_id: string | null;
-  lat: number | null;
-  lng: number | null;
-  logged_in: boolean | null;
-  last_active_at: string | null;
-  home_location: string | null;
-};
+import { type NfoStatusRow } from "../lib/nfoHelpers";
 
 type NfoRoutesViewProps = {
   nfos: NfoStatusRow[];
