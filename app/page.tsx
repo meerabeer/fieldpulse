@@ -17,6 +17,8 @@ import {
 } from "./lib/nfoHelpers";
 import LiveMap from "./components/LiveMap";
 import NfoRoutesView from "./components/NfoRoutesView";
+import RoutePlanner from "./components/RoutePlanner";
+import type { WarehouseRecord, RoutePlannerState } from "./components/RoutePlanner";
 
 const STUCK_MINUTES = 150; // 2.5 hours
 const REFRESH_INTERVAL_MS = 30_000; // 30 seconds auto-refresh
@@ -93,7 +95,7 @@ type StatusFilter =
 
 type KpiCategory = "total" | "onShift" | "busy" | "free" | "offShift" | "notActive";
 
-type View = "dashboard" | "map" | "routes" | "settings";
+type View = "dashboard" | "map" | "routes" | "routePlanner" | "settings";
 
 // Helper to safely read from localStorage (client-side only)
 function getStoredValue<T>(key: string, fallback: T): T {
@@ -137,11 +139,22 @@ export default function HomePage() {
   // Active KPI category for the NFO list panel
   const [activeKpi, setActiveKpi] = useState<KpiCategory | null>("total");
   
+  // Route Planner state - persists across tab switches (not F5)
+  const [routePlannerState, setRoutePlannerState] = useState<RoutePlannerState>({
+    selectedSiteId: "",
+    selectedWarehouseId: "",
+    selectedNfoUsername: "",
+    routeResult: null,
+    siteSearch: "",
+    nfoSearch: "",
+  });
+  
   // ============================================================
   // DATA STATE - Refreshed every 30 seconds from Supabase
   // ============================================================
   const [nfos, setNfos] = useState<NfoStatusRow[]>([]);
   const [sites, setSites] = useState<SiteRecord[]>([]);
+  const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
@@ -287,6 +300,34 @@ export default function HomePage() {
         }) ?? [];
       
       setSites(siteRecords);
+
+      // 1c) Load warehouses
+      const { data: warehouseRows, error: warehouseError } = await supabase
+        .from("warehouses")
+        .select("id, name, region, latitude, longitude, is_active");
+
+      if (warehouseError) {
+        console.warn("Failed to load warehouses:", warehouseError);
+        // Don't throw - warehouses are optional for the app to function
+      } else {
+        const warehouseRecords: WarehouseRecord[] = (warehouseRows ?? []).map((row: any) => {
+          const lat = typeof row.latitude === "string" ? parseFloat(row.latitude) : row.latitude;
+          const lng = typeof row.longitude === "string" ? parseFloat(row.longitude) : row.longitude;
+          return {
+            id: row.id,
+            name: row.name ?? "",
+            region: row.region ?? null,
+            latitude: Number.isFinite(lat) ? lat : null,
+            longitude: Number.isFinite(lng) ? lng : null,
+            is_active: row.is_active ?? false,
+          };
+        });
+        setWarehouses(warehouseRecords);
+        
+        if (isInitialLoad) {
+          console.log("Warehouse rows from Supabase:", warehouseRecords.length, "rows");
+        }
+      }
 
       // 2) Keep only latest row per username
       const latestByUser = new Map<string, NfoStatusRow>();
@@ -652,6 +693,7 @@ export default function HomePage() {
           {[
             { id: "dashboard", label: "Dashboard" },
             { id: "map", label: "Live map" },
+            { id: "routePlanner", label: "Route Planner" },
             // { id: "routes", label: "NFO routes" },  // Hidden from sidebar
             // { id: "settings", label: "Settings" }, // Hidden from sidebar
           ].map((item) => (
@@ -1022,6 +1064,24 @@ export default function HomePage() {
               Select a field engineer and site to view the route using the ORS backend.
             </p>
             <NfoRoutesView nfos={nfos} />
+          </div>
+        )}
+
+        {activeView === "routePlanner" && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Route Planner</h2>
+              <p className="text-xs text-slate-500">
+                Plan routes between NFOs, warehouses, and sites.
+              </p>
+            </div>
+            <RoutePlanner
+              nfos={enrichedNfos}
+              sites={sites}
+              warehouses={warehouses}
+              state={routePlannerState}
+              onStateChange={setRoutePlannerState}
+            />
           </div>
         )}
 
