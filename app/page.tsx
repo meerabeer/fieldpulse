@@ -53,6 +53,7 @@ type EnrichedNfo = NfoStatusRow & {
   nearestSiteName: string | null;
   nearestSiteDistanceKm: number | null;
   distanceToAssignedSiteKm: number | null; // Distance to site_id (assigned site)
+  airDistanceKm: number | null; // Computed air distance (may include warehouse leg)
   distanceLabel: string;
   siteLabel: string;
   isNotActive: boolean;
@@ -117,6 +118,223 @@ function setStoredValue(key: string, value: string): void {
   } catch {
     // Ignore storage errors (e.g., quota exceeded)
   }
+}
+
+/**
+ * FieldEngineerRow - Renders a single row in the Field Engineers table
+ * with per-row Route/Clear functionality using ORS.
+ */
+interface FieldEngineerRowProps {
+  enriched: EnrichedNfo;
+  sites: SiteRecord[];
+  warehouses: WarehouseRecord[];
+}
+
+interface RowRouteResult {
+  distanceKm: number;
+  durationMin: number | null; // null for fallback (straight-line)
+  viaWarehouse: string | null; // warehouse name if routed via warehouse
+  isFallback?: boolean; // true if ORS couldn't route
+}
+
+function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps) {
+  const [routeResult, setRouteResult] = useState<RowRouteResult | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [routeError, setRouteError] = useState<string | null>(null);
+
+  // Helper for case-insensitive warehouse name matching
+  const namesMatch = (a: string | null, b: string | null): boolean => {
+    if (!a || !b) return false;
+    return a.toLowerCase().trim() === b.toLowerCase().trim();
+  };
+
+  const handleRoute = async () => {
+    setRouteLoading(true);
+    setRouteError(null);
+    setRouteResult(null);
+
+    try {
+      // Check NFO has valid coordinates
+      if (!hasValidLocation({ lat: enriched.lat, lng: enriched.lng })) {
+        throw new Error("NFO has no GPS");
+      }
+
+      const nfoPoint = { lat: enriched.lat!, lng: enriched.lng! };
+      const assignedSiteId = (enriched.site_id ?? "").trim();
+
+      // Determine target site (same logic as airDistanceKm)
+      let targetSite: SiteRecord | null = null;
+      if (assignedSiteId) {
+        targetSite = getSiteById(sites, assignedSiteId) ?? null;
+      }
+      if (!targetSite && enriched.nearestSiteId) {
+        targetSite = getSiteById(sites, enriched.nearestSiteId) ?? null;
+      }
+
+      if (!targetSite || !hasValidLocation({ lat: targetSite.latitude, lng: targetSite.longitude })) {
+        throw new Error("No valid destination site");
+      }
+
+      const sitePoint = { lat: targetSite.latitude!, lng: targetSite.longitude! };
+
+      // Check if we should route via warehouse
+      const warehouseNameTrimmed = (enriched.warehouse_name ?? "").trim();
+      const matchingWarehouse = enriched.via_warehouse && warehouseNameTrimmed
+        ? warehouses.find(w =>
+            namesMatch(w.name, warehouseNameTrimmed) &&
+            hasValidLocation({ lat: w.latitude, lng: w.longitude })
+          )
+        : null;
+
+      // Build coordinates array: NFO -> (optional Warehouse) -> Site
+      // Format: [lng, lat] pairs as ORS expects
+      const coords: [number, number][] = [[nfoPoint.lng, nfoPoint.lat]];
+      if (matchingWarehouse) {
+        coords.push([matchingWarehouse.longitude!, matchingWarehouse.latitude!]);
+      }
+      coords.push([sitePoint.lng, sitePoint.lat]);
+
+      // Debug logging: log coordinates being sent
+      console.log("FieldEngineerRow route coords", {
+        username: enriched.username,
+        nfo: nfoPoint,
+        warehouse: matchingWarehouse ? { lat: matchingWarehouse.latitude, lng: matchingWarehouse.longitude, name: matchingWarehouse.name } : null,
+        site: { ...sitePoint, id: targetSite.site_id },
+        coordsArray: coords,
+      });
+
+      // Call our API route which handles ORS with increased search radius
+      const response = await fetch("/api/ors-route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          coordinates: coords,
+          profile: "driving-car",
+        }),
+      });
+
+      const data = await response.json();
+      console.log("FieldEngineerRow API response:", data);
+
+      // Check if ORS could build a route
+      if (!data.ok) {
+        // ORS could not build a proper driving route even with larger radius.
+        // Fallback: use air distance and show neutral message
+        console.log("FieldEngineerRow ORS fallback - using air distance");
+        
+        // Use the pre-computed air distance from enriched
+        setRouteResult({
+          distanceKm: enriched.airDistanceKm ?? 0,
+          durationMin: null, // Unknown for straight line
+          viaWarehouse: matchingWarehouse ? matchingWarehouse.name : null,
+          isFallback: true,
+        });
+        // Don't set routeError - keep it neutral
+        return;
+      }
+
+      // Success - use the route from ORS
+      setRouteResult({
+        distanceKm: data.route.distanceMeters / 1000,
+        durationMin: data.route.durationSeconds / 60,
+        viaWarehouse: matchingWarehouse ? matchingWarehouse.name : null,
+        isFallback: false,
+      });
+    } catch (err) {
+      // Only show error for actual failures (like missing GPS)
+      setRouteError(err instanceof Error ? err.message : "Route failed");
+    } finally {
+      setRouteLoading(false);
+    }
+  };
+
+  const handleClear = () => {
+    setRouteResult(null);
+    setRouteError(null);
+  };
+
+  // Format route summary
+  const formatRouteSummary = (result: RowRouteResult): string => {
+    const distStr = result.distanceKm.toFixed(2);
+    
+    if (result.isFallback) {
+      // Fallback: show air distance only, no ETA
+      if (result.viaWarehouse) {
+        return `${distStr} km (air) via ${result.viaWarehouse}`;
+      }
+      return `${distStr} km (air)`;
+    }
+    
+    // Normal ORS route: show distance and ETA
+    const durationStr = Math.round(result.durationMin ?? 0);
+    if (result.viaWarehouse) {
+      return `${distStr} km, ${durationStr} min via ${result.viaWarehouse}`;
+    }
+    return `${distStr} km, ${durationStr} min`;
+  };
+
+  return (
+    <tr className="border-b last:border-b-0">
+      <td className="py-2 px-2 font-mono text-xs">{enriched.username}</td>
+      <td className="py-2 px-2">{enriched.name}</td>
+      <td className="py-2 px-2">{enriched.on_shift ? "Yes" : "No"}</td>
+      <td className="py-2 px-2">{enriched.status}</td>
+      <td className="py-2 px-2">
+        {enriched.isNotActive ? (
+          <div>
+            <span className="text-red-600 font-semibold">Not Active</span>
+            <br />
+            <span className="text-xs text-gray-500">{enriched.pingReason}</span>
+          </div>
+        ) : (
+          <span className="text-green-600">OK</span>
+        )}
+      </td>
+      <td className="py-2 px-2">{enriched.activity}</td>
+      <td className="py-2 px-2 font-mono text-xs">
+        {enriched.site_id?.trim() ? enriched.site_id : "-"}
+      </td>
+      <td className="py-2 px-2 text-xs">{enriched.via_warehouse ? "Yes" : "-"}</td>
+      <td className="py-2 px-2 text-xs">{enriched.warehouse_name || "-"}</td>
+      <td className="py-2 px-2 text-xs">
+        {/* Route column with Route/Clear buttons and result */}
+        <div className="flex flex-col gap-1">
+          <div className="flex gap-1">
+            <button
+              onClick={handleRoute}
+              disabled={routeLoading}
+              className="px-2 py-0.5 text-xs bg-blue-500 text-white rounded hover:bg-blue-600 disabled:bg-blue-300"
+            >
+              {routeLoading ? "..." : "Route"}
+            </button>
+            {(routeResult || routeError) && (
+              <button
+                onClick={handleClear}
+                className="px-2 py-0.5 text-xs bg-gray-300 text-gray-700 rounded hover:bg-gray-400"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+          {routeResult && (
+            <span className={`text-xs ${routeResult.isFallback ? "text-amber-600" : "text-green-700"}`}>
+              {formatRouteSummary(routeResult)}
+            </span>
+          )}
+          {routeError && (
+            <span className="text-red-600 text-xs">{routeError}</span>
+          )}
+        </div>
+      </td>
+      <td className="py-2 px-2 text-xs">{enriched.nearestSiteId ?? "-"}</td>
+      <td className="py-2 px-2 text-xs">
+        {enriched.airDistanceKm != null ? enriched.airDistanceKm.toFixed(2) : "-"}
+      </td>
+      <td className="py-2 px-2 text-xs text-gray-500">
+        {enriched.last_active_at ? new Date(enriched.last_active_at).toLocaleString() : "-"}
+      </td>
+    </tr>
+  );
 }
 
 export default function HomePage() {
@@ -494,6 +712,12 @@ export default function HomePage() {
   );
 
   const enrichedNfos = useMemo(() => {
+    // Helper for case-insensitive warehouse name matching
+    const namesMatch = (a: string | null | undefined, b: string | null | undefined): boolean => {
+      if (!a || !b) return false;
+      return a.trim().toLowerCase() === b.trim().toLowerCase();
+    };
+
     return nfos.map((nfo) => {
       // Calculate online status
       const online = isOnline(nfo.last_active_at);
@@ -504,18 +728,18 @@ export default function HomePage() {
       let nearestSiteName: string | null = null;
       let nearestSiteDistanceKm: number | null = null;
       let distanceToAssignedSiteKm: number | null = null;
+      let airDistanceKm: number | null = null;
       let distanceLabel = "N/A";
       let siteLabel = "N/A";
 
       // Use new assignment-based busy/free and shift logic
       const { isBusy, isFree, isOnShift, isOffShift } = computeAssignmentState(nfo);
 
-      // Compute distance to assigned site (site_id) if available
+      const hasValidNfoCoords = hasValidLocation({ lat: nfo.lat, lng: nfo.lng });
       const assignedSiteId = (nfo.site_id ?? "").trim();
-      if (
-        assignedSiteId &&
-        hasValidLocation({ lat: nfo.lat, lng: nfo.lng })
-      ) {
+
+      // Compute distance to assigned site (site_id) if available
+      if (assignedSiteId && hasValidNfoCoords) {
         const assignedSite = getSiteById(sites, assignedSiteId);
         if (
           assignedSite &&
@@ -554,6 +778,50 @@ export default function HomePage() {
         siteLabel = `Busy at site ${assignedSiteId} - N/A (missing coordinates)`;
       }
 
+      // Compute airDistanceKm with via_warehouse logic
+      // Priority: 
+      // 1. If site_id + via_warehouse + valid warehouse -> NFO->Warehouse + Warehouse->Site
+      // 2. If site_id but no warehouse -> NFO->Site direct
+      // 3. No site_id -> NFO->Nearest site
+      if (hasValidNfoCoords) {
+        let targetSite: SiteRecord | null = null;
+        
+        // Try to get assigned site first
+        if (assignedSiteId) {
+          targetSite = getSiteById(sites, assignedSiteId) ?? null;
+        }
+        
+        // Fall back to nearest site if no assigned site
+        if (!targetSite && nearest) {
+          targetSite = nearest.site as SiteRecord;
+        }
+        
+        if (targetSite && hasValidLocation({ lat: targetSite.latitude, lng: targetSite.longitude })) {
+          const nfoPoint = { lat: nfo.lat!, lng: nfo.lng! };
+          const sitePoint = { lat: targetSite.latitude!, lng: targetSite.longitude! };
+          
+          // Check if we should route via warehouse
+          const warehouseNameTrimmed = (nfo.warehouse_name ?? "").trim();
+          const matchingWarehouse = nfo.via_warehouse && warehouseNameTrimmed
+            ? warehouses.find(w => 
+                namesMatch(w.name, warehouseNameTrimmed) && 
+                hasValidLocation({ lat: w.latitude, lng: w.longitude })
+              )
+            : null;
+          
+          if (matchingWarehouse) {
+            // Route via warehouse: NFO -> Warehouse + Warehouse -> Site
+            const whPoint = { lat: matchingWarehouse.latitude!, lng: matchingWarehouse.longitude! };
+            const leg1 = calculateDistanceKm(nfoPoint, whPoint);
+            const leg2 = calculateDistanceKm(whPoint, sitePoint);
+            airDistanceKm = leg1 + leg2;
+          } else {
+            // Direct route: NFO -> Site
+            airDistanceKm = calculateDistanceKm(nfoPoint, sitePoint);
+          }
+        }
+      }
+
       // Compute ping status (not active if no ping > 30 min)
       const { isNotActive, pingReason } = computePingStatus(nfo.last_active_at);
 
@@ -569,6 +837,7 @@ export default function HomePage() {
         nearestSiteName,
         nearestSiteDistanceKm,
         distanceToAssignedSiteKm,
+        airDistanceKm,
         distanceLabel,
         siteLabel,
         isNotActive,
@@ -581,7 +850,7 @@ export default function HomePage() {
         isDeviceSilent,
       };
     });
-  }, [nfos, sites]);
+  }, [nfos, sites, warehouses]);
 
   // Compute stats from enrichedNfos using the computed flags
   const stats = useMemo((): Stats => {
@@ -966,6 +1235,9 @@ export default function HomePage() {
                       <th className="text-left py-2 px-2">Ping Status</th>
                       <th className="text-left py-2 px-2">Activity</th>
                       <th className="text-left py-2 px-2">Site ID</th>
+                      <th className="text-left py-2 px-2">Via warehouse</th>
+                      <th className="text-left py-2 px-2">Warehouse</th>
+                      <th className="text-left py-2 px-2">Route</th>
                       <th className="text-left py-2 px-2">Nearest site</th>
                       <th className="text-left py-2 px-2">Air distance (km)</th>
                       <th className="text-left py-2 px-2">Last active</th>
@@ -976,45 +1248,12 @@ export default function HomePage() {
                       const enriched = enrichedNfos.find((e) => e.username === nfo.username);
                       if (!enriched) return null;
                       return (
-                        <tr key={nfo.username} className="border-b last:border-b-0">
-                          <td className="py-2 px-2 font-mono text-xs">
-                            {nfo.username}
-                          </td>
-                          <td className="py-2 px-2">{nfo.name}</td>
-                          <td className="py-2 px-2">
-                            {nfo.on_shift ? "Yes" : "No"}
-                          </td>
-                          <td className="py-2 px-2">{nfo.status}</td>
-                          <td className="py-2 px-2">
-                            {enriched.isNotActive ? (
-                              <div>
-                                <span className="text-red-600 font-semibold">Not Active</span>
-                                <br />
-                                <span className="text-xs text-gray-500">{enriched.pingReason}</span>
-                              </div>
-                            ) : (
-                              <span className="text-green-600">OK</span>
-                            )}
-                          </td>
-                          <td className="py-2 px-2">{nfo.activity}</td>
-                          <td className="py-2 px-2 font-mono text-xs">
-                            {nfo.site_id?.trim() ? nfo.site_id : "-"}
-                          </td>
-                          <td className="py-2 px-2 text-xs">
-                            {enriched.nearestSiteId ?? "-"}
-                          </td>
-                          <td className="py-2 px-2 text-xs">
-                            {/* Show distance to assigned site_id if available, otherwise fall back to nearest site */}
-                            {(enriched.distanceToAssignedSiteKm ?? enriched.nearestSiteDistanceKm) !== null
-                              ? (enriched.distanceToAssignedSiteKm ?? enriched.nearestSiteDistanceKm)!.toFixed(2)
-                              : "-"}
-                          </td>
-                          <td className="py-2 px-2 text-xs text-gray-500">
-                            {nfo.last_active_at
-                              ? new Date(nfo.last_active_at).toLocaleString()
-                              : "-"}
-                          </td>
-                        </tr>
+                        <FieldEngineerRow
+                          key={nfo.username}
+                          enriched={enriched}
+                          sites={sites}
+                          warehouses={warehouses}
+                        />
                       );
                     })}
                   </tbody>

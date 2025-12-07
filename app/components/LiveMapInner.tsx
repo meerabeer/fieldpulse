@@ -745,12 +745,14 @@ export default function LiveMapInner({
       const endLat = selectedSiteFromSearch.latitude as number;
 
       // Use the correct ORS backend endpoint with query parameters
+      // Include maximum_search_radius to handle off-road sites (5 km)
       const params = new URLSearchParams({
         start_lon: String(startLng),
         start_lat: String(startLat),
         end_lon: String(endLng),
         end_lat: String(endLat),
         profile: "driving-car",
+        maximum_search_radius: "5000", // 5 km - handle off-road sites
       });
 
       const url = `${baseUrl}/route?${params}`;

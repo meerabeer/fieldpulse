@@ -38,6 +38,7 @@ export type RouteResult = {
   durationSeconds: number;
   viaWarehouse: boolean;
   warehouseName?: string;
+  isFallback?: boolean; // True if ORS couldn't route and we're showing straight-line
 };
 
 export type RoutePlannerState = {
@@ -205,17 +206,18 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
     return points;
   }, [selectedNfo, selectedWarehouse, selectedSite]);
 
-  // Fetch route from ORS backend
+  // Fetch route from ORS backend via our API route (with increased search radius)
   const fetchRoute = useCallback(async () => {
     if (!canRoute || !selectedNfo || !selectedSite) return;
 
+    // Clear previous route data before starting new fetch
     setRouteLoading(true);
     setRouteError(null);
+    updateState({ routeResult: null });
 
     try {
-      const baseUrl = process.env.NEXT_PUBLIC_ORS_BACKEND_URL || "https://meerabeer1990-nfo-ors-backend.hf.space";
-
       // Build coordinates array: NFO -> (optional Warehouse) -> Site
+      // Format: [lng, lat] pairs as ORS expects
       const coords: [number, number][] = [];
       
       coords.push([selectedNfo.lng!, selectedNfo.lat!]);
@@ -226,71 +228,78 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
       
       coords.push([selectedSite.longitude!, selectedSite.latitude!]);
 
-      // For multi-waypoint routes, we need to make multiple calls to the existing API
-      // since it only supports start/end, or use the /route endpoint if it supports waypoints
-      
-      let totalDistanceMeters = 0;
-      let totalDurationSeconds = 0;
-      let allCoordinates: [number, number][] = [];
+      // Debug logging: log coordinates being sent
+      console.log("RoutePlanner fetchRoute coords", {
+        nfo: { lat: selectedNfo.lat, lng: selectedNfo.lng },
+        warehouse: selectedWarehouse ? { lat: selectedWarehouse.latitude, lng: selectedWarehouse.longitude } : null,
+        site: { lat: selectedSite.latitude, lng: selectedSite.longitude, id: selectedSite.site_id },
+        coordsArray: coords,
+      });
 
-      // Make route requests for each leg
-      for (let i = 0; i < coords.length - 1; i++) {
-        const [startLng, startLat] = coords[i];
-        const [endLng, endLat] = coords[i + 1];
-
-        const params = new URLSearchParams({
-          start_lon: String(startLng),
-          start_lat: String(startLat),
-          end_lon: String(endLng),
-          end_lat: String(endLat),
+      // Call our API route which handles ORS with increased search radius
+      const response = await fetch("/api/ors-route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          coordinates: coords,
           profile: "driving-car",
+        }),
+      });
+
+      const data = await response.json();
+      console.log("RoutePlanner API response:", data);
+
+      // Check if ORS could build a route
+      if (!data.ok) {
+        // ORS could not build a proper driving route even with larger radius.
+        // Fallback: create a straight-line route and show neutral message
+        console.log("RoutePlanner ORS fallback - creating straight line route");
+        
+        // Build straight-line coordinates for the fallback polyline
+        const straightLineCoords: [number, number][] = coords;
+        
+        // Calculate straight-line distance for display
+        const startPt = { lat: selectedNfo.lat!, lng: selectedNfo.lng! };
+        const endPt = { lat: selectedSite.latitude!, lng: selectedSite.longitude! };
+        const R = 6371; // Earth's radius in km
+        const dLat = (endPt.lat - startPt.lat) * Math.PI / 180;
+        const dLon = (endPt.lng - startPt.lng) * Math.PI / 180;
+        const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                  Math.cos(startPt.lat * Math.PI / 180) * Math.cos(endPt.lat * Math.PI / 180) *
+                  Math.sin(dLon/2) * Math.sin(dLon/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        const airDistanceKm = R * c;
+
+        updateState({
+          routeResult: {
+            coordinates: straightLineCoords,
+            distanceMeters: airDistanceKm * 1000,
+            durationSeconds: 0, // Unknown for straight line
+            viaWarehouse: !!selectedWarehouse,
+            warehouseName: selectedWarehouse?.name,
+            isFallback: true, // Flag to indicate this is a straight-line fallback
+          },
         });
-
-        const url = `${baseUrl}/route?${params}`;
-        
-        const response = await fetch(url, {
-          headers: { "Content-Type": "application/json" },
-        });
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-        
-        const feature = data.features?.[0];
-        if (!feature) {
-          throw new Error("No route found");
-        }
-
-        const legCoordinates = feature.geometry?.coordinates as [number, number][] || [];
-        const summary = feature.properties?.summary;
-        const distanceMeters = summary?.distance ?? 0;
-        const durationSeconds = summary?.duration ?? 0;
-
-        totalDistanceMeters += distanceMeters;
-        totalDurationSeconds += durationSeconds;
-        
-        // Append coordinates (skip first point on subsequent legs to avoid duplicates)
-        if (i === 0) {
-          allCoordinates = [...legCoordinates];
-        } else {
-          allCoordinates = [...allCoordinates, ...legCoordinates.slice(1)];
-        }
+        // Don't set routeError - keep it neutral
+        setRouteLoading(false);
+        return;
       }
 
+      // Success - use the route from ORS
       updateState({
         routeResult: {
-          coordinates: allCoordinates,
-          distanceMeters: totalDistanceMeters,
-          durationSeconds: totalDurationSeconds,
+          coordinates: data.route.coordinates,
+          distanceMeters: data.route.distanceMeters,
+          durationSeconds: data.route.durationSeconds,
           viaWarehouse: !!selectedWarehouse,
           warehouseName: selectedWarehouse?.name,
+          isFallback: false,
         },
       });
     } catch (error) {
-      console.error("Route fetch error:", error);
-      setRouteError("Failed to calculate route. Please try again.");
+      console.error("RoutePlanner fetch error:", error);
+      // Even on network error, don't show scary message - just clear the route
+      updateState({ routeResult: null });
     } finally {
       setRouteLoading(false);
     }
@@ -450,7 +459,16 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
             <h3 className="font-semibold text-slate-800 text-sm">Route Summary</h3>
             
             <div className="text-sm text-slate-600 space-y-1">
-              {routeResult.viaWarehouse ? (
+              {routeResult.isFallback ? (
+                <>
+                  <p className="font-medium text-slate-700">
+                    Direct line: NFO → {routeResult.viaWarehouse ? "Warehouse → " : ""}Site
+                  </p>
+                  <p className="text-xs text-amber-600">
+                    (No road match near site – showing straight line)
+                  </p>
+                </>
+              ) : routeResult.viaWarehouse ? (
                 <>
                   <p className="font-medium text-slate-700">
                     NFO → Warehouse → Site
@@ -466,17 +484,21 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
 
             <div className="border-t border-slate-100 pt-3 space-y-2">
               <div className="flex justify-between text-sm">
-                <span className="text-slate-600">Driving distance:</span>
+                <span className="text-slate-600">
+                  {routeResult.isFallback ? "Air distance:" : "Driving distance:"}
+                </span>
                 <span className="font-semibold text-slate-800">
                   {formatDistance(routeResult.distanceMeters)}
                 </span>
               </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-slate-600">ETA:</span>
-                <span className="font-semibold text-slate-800">
-                  {formatDuration(routeResult.durationSeconds)}
-                </span>
-              </div>
+              {!routeResult.isFallback && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-600">ETA:</span>
+                  <span className="font-semibold text-slate-800">
+                    {formatDuration(routeResult.durationSeconds)}
+                  </span>
+                </div>
+              )}
             </div>
 
             {airDistances && (
