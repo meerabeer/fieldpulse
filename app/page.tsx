@@ -1288,6 +1288,7 @@ export default function HomePage() {
           <LiveMap 
             nfos={nfos} 
             sites={sites}
+            warehouses={warehouses}
             mapAreaFilter={mapAreaFilter}
             mapNfoFilter={mapNfoFilter}
             onMapAreaFilterChange={handleSetMapAreaFilter}

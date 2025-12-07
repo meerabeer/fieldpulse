@@ -14,7 +14,9 @@ import {
   isOnline,
   ageMinutes,
   computeAssignmentState,
+  computePingStatus,
 } from "../lib/nfoHelpers";
+import type { WarehouseRecord } from "./RoutePlanner";
 
 const PAGE_SIZE = 1000;
 
@@ -30,6 +32,7 @@ const PAGE_SIZE = 1000;
 type LiveMapInnerProps = {
   nfos: NfoStatusRow[];
   sites: SiteRecord[];
+  warehouses: WarehouseRecord[];
   // Persisted state - controlled by parent
   mapAreaFilter: string | null;        // "NFOs_ONLY", null (All Sites), or specific area name
   mapNfoFilter: string | null;         // null (all), "free", "busy", "on-shift", "off-shift"
@@ -77,6 +80,17 @@ const nfoOffIcon = L.icon({
     "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-grey.png",
   iconRetinaUrl:
     "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-grey.png",
+  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+});
+
+// Warehouse marker - Orange (distinct from NFOs and sites)
+const warehouseIcon = L.icon({
+  iconUrl:
+    "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-orange.png",
+  iconRetinaUrl:
+    "https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-orange.png",
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
   iconSize: [25, 41],
   iconAnchor: [12, 41],
@@ -178,8 +192,19 @@ function SiteSearch({ sitesWithCoords, onSiteSelect }: { sitesWithCoords: SiteRe
 
 /**
  * NFO Search component - search and zoom to specific NFOs
+ * Now also sets selectedNfoForTile for the bottom panel
  */
-function NfoSearch({ nfosWithCoords }: { nfosWithCoords: NfoStatusRow[] }) {
+function NfoSearch({ 
+  nfosWithCoords, 
+  onNfoSelect,
+  selectedNfoUsername,
+  onClear,
+}: { 
+  nfosWithCoords: NfoStatusRow[];
+  onNfoSelect: (nfo: NfoStatusRow) => void;
+  selectedNfoUsername: string | null;
+  onClear: () => void;
+}) {
   const [searchTerm, setSearchTerm] = useState("");
   const [isOpen, setIsOpen] = useState(false);
 
@@ -197,6 +222,8 @@ function NfoSearch({ nfosWithCoords }: { nfosWithCoords: NfoStatusRow[] }) {
     (nfo: NfoStatusRow) => {
       setSearchTerm("");
       setIsOpen(false);
+      // Set the selected NFO for the tile
+      onNfoSelect(nfo);
       // Zoom to NFO and open popup
       if (hasValidLocation({ lat: nfo.lat, lng: nfo.lng })) {
         window.dispatchEvent(
@@ -206,26 +233,52 @@ function NfoSearch({ nfosWithCoords }: { nfosWithCoords: NfoStatusRow[] }) {
         );
       }
     },
-    []
+    [onNfoSelect]
   );
+
+  const handleClear = () => {
+    setSearchTerm("");
+    setIsOpen(false);
+    onClear();
+  };
+
+  // Find selected NFO name for display
+  const selectedNfo = selectedNfoUsername 
+    ? nfosWithCoords.find(n => n.username === selectedNfoUsername)
+    : null;
 
   return (
     <div className="relative text-xs">
-      <input
-        type="text"
-        placeholder="Search by NFO name or username..."
-        value={searchTerm}
-        onChange={(e) => {
-          setSearchTerm(e.target.value);
-          setIsOpen(true);
-        }}
-        onFocus={() => setIsOpen(true)}
-        onBlur={() => {
-          // Delay closing to allow click on dropdown
-          setTimeout(() => setIsOpen(false), 200);
-        }}
-        className="w-full px-2 py-1.5 border border-gray-300 rounded text-xs focus:outline-none focus:border-blue-500"
-      />
+      <div className="flex gap-1">
+        <div className="flex-1 relative">
+          <input
+            type="text"
+            placeholder={selectedNfo ? `Selected: ${selectedNfo.name || selectedNfo.username}` : "Search by NFO name or username..."}
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setIsOpen(true);
+            }}
+            onFocus={() => setIsOpen(true)}
+            onBlur={() => {
+              // Delay closing to allow click on dropdown
+              setTimeout(() => setIsOpen(false), 200);
+            }}
+            className={`w-full px-2 py-1.5 border rounded text-xs focus:outline-none focus:border-blue-500 ${
+              selectedNfo ? "border-green-500 bg-green-50" : "border-gray-300"
+            }`}
+          />
+        </div>
+        {selectedNfoUsername && (
+          <button
+            onClick={handleClear}
+            className="px-2 py-1 bg-gray-200 hover:bg-gray-300 text-gray-700 rounded text-xs font-medium"
+            title="Clear NFO selection and route"
+          >
+            ✕ Clear
+          </button>
+        )}
+      </div>
 
       {isOpen && searchTerm.trim() && (
         <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-300 rounded shadow-lg max-h-48 overflow-y-auto z-50">
@@ -399,11 +452,17 @@ function MapCenterControl() {
 function MapLegend({
   sitesWithCoords,
   nfosWithCoords,
+  warehouseCount,
+  showWarehouses,
+  onToggleWarehouses,
   selectedNfoFilter,
   onFilterChange,
 }: {
   sitesWithCoords: SiteRecord[];
   nfosWithCoords: NfoStatusRow[];
+  warehouseCount: number;
+  showWarehouses: boolean;
+  onToggleWarehouses: () => void;
   selectedNfoFilter: string | null;
   onFilterChange: (filter: string | null) => void;
 }) {
@@ -464,6 +523,23 @@ function MapLegend({
           <span className="text-gray-500 font-medium">({counts.sites})</span>
         </div>
 
+        {/* Warehouses toggle */}
+        <button
+          onClick={onToggleWarehouses}
+          className={`w-full flex items-center gap-2 p-1.5 rounded transition-all cursor-pointer ${
+            showWarehouses
+              ? "bg-orange-100 ring-2 ring-orange-500"
+              : "hover:bg-gray-100"
+          }`}
+        >
+          <div
+            className="w-5 h-5 rounded-full flex-shrink-0"
+            style={{ backgroundColor: "#f97316" }}
+          />
+          <span className="flex-1 text-left">Warehouses</span>
+          <span className="text-gray-500 font-medium">({warehouseCount})</span>
+        </button>
+
         {/* Connection line info */}
         <div className="flex items-center gap-2 p-1.5">
           <div
@@ -485,9 +561,45 @@ type RouteInfo = {
   durationSeconds: number;
 };
 
+// Route result for NFO tile (similar to dashboard)
+type NfoTileRouteResult = {
+  distanceKm: number;
+  durationMin: number | null; // null for fallback (straight-line)
+  coordinates: [number, number][]; // [lng, lat] pairs for polyline
+  viaWarehouse: string | null;
+  isFallback?: boolean;
+};
+
+// Helper for case-insensitive warehouse name matching (same as dashboard)
+const namesMatch = (a: string | null, b: string | null): boolean => {
+  if (!a || !b) return false;
+  return a.toLowerCase().trim() === b.toLowerCase().trim();
+};
+
+// Format route summary - SAME FORMAT AS DASHBOARD: "107.41 km, 77 min via Jeddah MC"
+const formatRouteSummary = (result: NfoTileRouteResult): string => {
+  const distStr = result.distanceKm.toFixed(2);
+  
+  if (result.isFallback) {
+    // Fallback: show air distance only, no ETA
+    if (result.viaWarehouse) {
+      return `📏 ${distStr} km (air) via ${result.viaWarehouse}`;
+    }
+    return `📏 ${distStr} km (air)`;
+  }
+  
+  // Normal ORS route: show distance and ETA
+  const durationStr = Math.round(result.durationMin ?? 0);
+  if (result.viaWarehouse) {
+    return `🚗 ${distStr} km, ${durationStr} min via ${result.viaWarehouse}`;
+  }
+  return `🚗 ${distStr} km, ${durationStr} min`;
+};
+
 export default function LiveMapInner({ 
   nfos, 
   sites,
+  warehouses,
   mapAreaFilter,
   mapNfoFilter,
   onMapAreaFilterChange,
@@ -507,10 +619,27 @@ export default function LiveMapInner({
   // Track which NFO should have its popup opened (from NFO search)
   const [selectedNfoUsername, setSelectedNfoUsername] = useState<string | null>(null);
   
-  // ORS Route state (ephemeral - route clears on tab switch, which is expected)
+  // ORS Route state for "Top 5 Closest NFOs" panel (ephemeral - route clears on tab switch)
   const [activeRoute, setActiveRoute] = useState<RouteInfo | null>(null);
   const [routeLoading, setRouteLoading] = useState<string | null>(null); // username of NFO being loaded
   const [routeError, setRouteError] = useState<string | null>(null);
+
+  // Selected NFO for bottom tile (persistent across map interactions until cleared)
+  const [selectedNfoForTile, setSelectedNfoForTile] = useState<NfoStatusRow | null>(null);
+  // Route state for the NFO tile
+  const [nfoTileRoute, setNfoTileRoute] = useState<NfoTileRouteResult | null>(null);
+  const [nfoTileRouteLoading, setNfoTileRouteLoading] = useState(false);
+  const [nfoTileRouteError, setNfoTileRouteError] = useState<string | null>(null);
+
+  // Warehouse visibility toggle (default: show warehouses)
+  const [showWarehouses, setShowWarehouses] = useState(true);
+
+  // Filter warehouses to only those with valid coordinates
+  const warehousesWithCoords = useMemo(() => {
+    return warehouses.filter(w => 
+      hasValidLocation({ lat: w.latitude, lng: w.longitude }) && w.is_active
+    );
+  }, [warehouses]);
 
   // Listen for NFO selection event from search
   useEffect(() => {
@@ -608,7 +737,8 @@ export default function LiveMapInner({
   }, [allSitesWithCoords]);
 
   // Enrich each NFO with site and distance information
-  // This uses the same logic as the Dashboard to ensure consistency
+  // This uses the SAME logic as the Dashboard to ensure consistency
+  // Fields: nearestSiteId, airDistanceKm (with via_warehouse leg), pingStatus, etc.
   // MUST be defined BEFORE closestNfosToSelectedSite
   const enrichedNfos = useMemo(() => {
     return nfosWithCoords.map((nfo) => {
@@ -616,18 +746,39 @@ export default function LiveMapInner({
       let selectedSiteName: string | null = null;
       let selectedSiteArea: string | null = null;
       let selectedSiteDistanceKm: number | null = null;
+      
+      // NEW: Match dashboard fields exactly
+      let nearestSiteId: string | null = null;
+      let nearestSiteDistanceKm: number | null = null;
+      let airDistanceKm: number | null = null;
 
       // Use new assignment-based busy logic
-      const { isBusy } = computeAssignmentState(nfo);
+      const { isBusy, isFree, isOnShift, isOffShift } = computeAssignmentState(nfo);
+      
+      // Compute ping status (same as dashboard)
+      const { isNotActive, pingReason } = computePingStatus(nfo.last_active_at);
 
-      // 1a. If NFO is busy and has an assigned site with valid coords, use that
+      const hasValidNfoCoords = hasValidLocation({ lat: nfo.lat, lng: nfo.lng });
+      const assignedSiteId = (nfo.site_id ?? "").trim();
+
+      // Always find the nearest site first (for the "Nearest site" field)
+      const nearest = findNearestSite(
+        { lat: nfo.lat, lng: nfo.lng },
+        sites
+      );
+      if (nearest) {
+        const siteRec = nearest.site as SiteRecord;
+        nearestSiteId = siteRec.site_id;
+        nearestSiteDistanceKm = nearest.distanceKm;
+      }
+
+      // 1a. If NFO is busy and has an assigned site with valid coords, use that for display
       if (
         isBusy &&
-        nfo.site_id &&
-        hasValidLocation({ lat: nfo.lat, lng: nfo.lng })
+        assignedSiteId &&
+        hasValidNfoCoords
       ) {
-        // Look up site from ALL sites (not just those with coords), as site may exist but have no coords
-        const activeSite = getSiteById(sites, nfo.site_id);
+        const activeSite = getSiteById(sites, assignedSiteId);
         if (
           activeSite &&
           hasValidLocation({ lat: activeSite.latitude, lng: activeSite.longitude })
@@ -641,25 +792,62 @@ export default function LiveMapInner({
           selectedSiteArea = activeSite.area ?? null;
           selectedSiteDistanceKm = dist;
         } else if (activeSite) {
-          // Site exists but doesn't have valid coords - still show site info without distance
+          // Site exists but doesn't have valid coords
           selectedSiteId = activeSite.site_id;
           selectedSiteName = activeSite.name ?? null;
           selectedSiteArea = activeSite.area ?? null;
           selectedSiteDistanceKm = null;
         }
-      } else {
-        // 1b. Otherwise, find nearest site
-        const nearest = findNearestSite(
-          { lat: nfo.lat, lng: nfo.lng },
-          sites
-        );
+      } else if (nearest) {
+        // 1b. Otherwise, use nearest site
+        const siteRec = nearest.site as SiteRecord;
+        selectedSiteId = siteRec.site_id;
+        selectedSiteName = siteRec.name ?? null;
+        selectedSiteArea = siteRec.area ?? null;
+        selectedSiteDistanceKm = nearest.distanceKm;
+      }
 
-        if (nearest) {
-          const siteRec = nearest.site as SiteRecord;
-          selectedSiteId = siteRec.site_id;
-          selectedSiteName = siteRec.name ?? null;
-          selectedSiteArea = siteRec.area ?? null;
-          selectedSiteDistanceKm = nearest.distanceKm;
+      // Compute airDistanceKm with via_warehouse logic (SAME as dashboard)
+      // Priority: 
+      // 1. If site_id + via_warehouse + valid warehouse -> NFO->Warehouse + Warehouse->Site
+      // 2. If site_id but no warehouse -> NFO->Site direct
+      // 3. No site_id -> NFO->Nearest site
+      if (hasValidNfoCoords) {
+        let targetSite: SiteRecord | null = null;
+        
+        // Try to get assigned site first
+        if (assignedSiteId) {
+          targetSite = getSiteById(sites, assignedSiteId) ?? null;
+        }
+        
+        // Fall back to nearest site if no assigned site
+        if (!targetSite && nearest) {
+          targetSite = nearest.site as SiteRecord;
+        }
+        
+        if (targetSite && hasValidLocation({ lat: targetSite.latitude, lng: targetSite.longitude })) {
+          const nfoPoint = { lat: nfo.lat!, lng: nfo.lng! };
+          const sitePoint = { lat: targetSite.latitude!, lng: targetSite.longitude! };
+          
+          // Check if we should route via warehouse
+          const warehouseNameTrimmed = (nfo.warehouse_name ?? "").trim();
+          const matchingWarehouse = nfo.via_warehouse && warehouseNameTrimmed
+            ? warehouses.find(w => 
+                namesMatch(w.name, warehouseNameTrimmed) && 
+                hasValidLocation({ lat: w.latitude, lng: w.longitude })
+              )
+            : null;
+          
+          if (matchingWarehouse) {
+            // Route via warehouse: NFO -> Warehouse + Warehouse -> Site
+            const whPoint = { lat: matchingWarehouse.latitude!, lng: matchingWarehouse.longitude! };
+            const leg1 = calculateDistanceKm(nfoPoint, whPoint);
+            const leg2 = calculateDistanceKm(whPoint, sitePoint);
+            airDistanceKm = leg1 + leg2;
+          } else {
+            // Direct route: NFO -> Site
+            airDistanceKm = calculateDistanceKm(nfoPoint, sitePoint);
+          }
         }
       }
 
@@ -668,10 +856,14 @@ export default function LiveMapInner({
           username: nfo.username,
           status: nfo.status,
           site_id: nfo.site_id,
+          via_warehouse: nfo.via_warehouse,
+          warehouse_name: nfo.warehouse_name,
           nfoLat: nfo.lat,
           nfoLng: nfo.lng,
           selectedSiteId,
           selectedSiteDistanceKm,
+          nearestSiteId,
+          airDistanceKm,
         });
       }
 
@@ -681,9 +873,19 @@ export default function LiveMapInner({
         selectedSiteName,
         selectedSiteArea,
         selectedSiteDistanceKm,
+        // NEW: Dashboard-matching fields
+        nearestSiteId,
+        nearestSiteDistanceKm,
+        airDistanceKm,
+        isNotActive,
+        pingReason,
+        isBusy,
+        isFree,
+        isOnShift,
+        isOffShift,
       };
     });
-  }, [nfosWithCoords, sites]);
+  }, [nfosWithCoords, sites, warehouses]);
 
   // Filter enrichedNfos based on selected status filter (mapNfoFilter from props)
   const filteredEnrichedNfos = useMemo(() => {
@@ -800,6 +1002,142 @@ export default function LiveMapInner({
     setRouteError(null);
   }, [selectedSiteFromSearch]);
 
+  // Handle NFO selection for the tile (from search or marker click)
+  const handleNfoSelectForTile = useCallback((nfo: NfoStatusRow) => {
+    setSelectedNfoForTile(nfo);
+    setSelectedNfoUsername(nfo.username);
+    // Clear any previous route
+    setNfoTileRoute(null);
+    setNfoTileRouteError(null);
+  }, []);
+
+  // Clear NFO selection and route
+  const handleClearNfoTile = useCallback(() => {
+    setSelectedNfoForTile(null);
+    setSelectedNfoUsername(null);
+    setNfoTileRoute(null);
+    setNfoTileRouteError(null);
+  }, []);
+
+  // Fetch route for the selected NFO tile (uses /api/ors-route like dashboard)
+  // SAME LOGIC AS DASHBOARD: NFO -> (optional Warehouse) -> Site
+  const fetchRouteForNfoTile = useCallback(async () => {
+    if (!selectedNfoForTile) return;
+    
+    // Check NFO has valid coordinates
+    if (!hasValidLocation({ lat: selectedNfoForTile.lat, lng: selectedNfoForTile.lng })) {
+      setNfoTileRouteError("NFO has no GPS coordinates");
+      return;
+    }
+
+    // Find target site (assigned site_id or nearest site) - SAME as dashboard
+    const assignedSiteId = (selectedNfoForTile.site_id ?? "").trim();
+    let targetSite: SiteRecord | null = null;
+    
+    if (assignedSiteId) {
+      targetSite = getSiteById(sites, assignedSiteId) ?? null;
+    }
+    
+    // If no assigned site, find nearest site
+    if (!targetSite) {
+      const nearest = findNearestSite(
+        { lat: selectedNfoForTile.lat, lng: selectedNfoForTile.lng },
+        sites
+      );
+      if (nearest) {
+        targetSite = nearest.site as SiteRecord;
+      }
+    }
+    
+    if (!targetSite || !hasValidLocation({ lat: targetSite.latitude, lng: targetSite.longitude })) {
+      setNfoTileRouteError("No valid destination site");
+      return;
+    }
+
+    setNfoTileRouteLoading(true);
+    setNfoTileRouteError(null);
+    setNfoTileRoute(null);
+
+    try {
+      const nfoPoint = { lat: selectedNfoForTile.lat!, lng: selectedNfoForTile.lng! };
+      const sitePoint = { lat: targetSite.latitude!, lng: targetSite.longitude! };
+
+      // Check if we should route via warehouse (SAME as dashboard)
+      const warehouseNameTrimmed = (selectedNfoForTile.warehouse_name ?? "").trim();
+      const matchingWarehouse = selectedNfoForTile.via_warehouse && warehouseNameTrimmed
+        ? warehouses.find(w =>
+            namesMatch(w.name, warehouseNameTrimmed) &&
+            hasValidLocation({ lat: w.latitude, lng: w.longitude })
+          )
+        : null;
+
+      // Build coordinates array: NFO -> (optional Warehouse) -> Site
+      // Format: [lng, lat] pairs as ORS expects
+      const coords: [number, number][] = [[nfoPoint.lng, nfoPoint.lat]];
+      if (matchingWarehouse) {
+        coords.push([matchingWarehouse.longitude!, matchingWarehouse.latitude!]);
+      }
+      coords.push([sitePoint.lng, sitePoint.lat]);
+
+      console.log("NFO Tile route request:", {
+        username: selectedNfoForTile.username,
+        nfo: nfoPoint,
+        warehouse: matchingWarehouse ? { lat: matchingWarehouse.latitude, lng: matchingWarehouse.longitude, name: matchingWarehouse.name } : null,
+        site: { ...sitePoint, id: targetSite.site_id },
+        coordsArray: coords,
+      });
+
+      // Call our API route which handles ORS with increased search radius
+      const response = await fetch("/api/ors-route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          coordinates: coords,
+          profile: "driving-car",
+        }),
+      });
+
+      const data = await response.json();
+      console.log("NFO Tile route response:", data);
+
+      // Check if ORS could build a route
+      if (!data.ok) {
+        // Fallback: use air distance (with warehouse if applicable)
+        // Get the enriched NFO which has pre-computed airDistanceKm
+        const enriched = enrichedNfos.find(n => n.username === selectedNfoForTile.username);
+        const fallbackDistance = enriched?.airDistanceKm ?? calculateDistanceKm(nfoPoint, sitePoint);
+        
+        setNfoTileRoute({
+          distanceKm: fallbackDistance,
+          durationMin: null,
+          coordinates: coords,
+          viaWarehouse: matchingWarehouse ? matchingWarehouse.name : null,
+          isFallback: true,
+        });
+        return;
+      }
+
+      // Success - use the route from ORS
+      setNfoTileRoute({
+        distanceKm: data.route.distanceMeters / 1000,
+        durationMin: data.route.durationSeconds / 60,
+        coordinates: data.route.coordinates,
+        viaWarehouse: matchingWarehouse ? matchingWarehouse.name : null,
+        isFallback: false,
+      });
+    } catch (err) {
+      setNfoTileRouteError(err instanceof Error ? err.message : "Route failed");
+    } finally {
+      setNfoTileRouteLoading(false);
+    }
+  }, [selectedNfoForTile, sites, warehouses, enrichedNfos]);
+
+  // Get enriched data for the selected NFO tile
+  const enrichedSelectedNfo = useMemo(() => {
+    if (!selectedNfoForTile) return null;
+    return enrichedNfos.find(n => n.username === selectedNfoForTile.username) ?? null;
+  }, [selectedNfoForTile, enrichedNfos]);
+
   // Build connection lines: NFO to selected site
   const connectionLines = useMemo(() => {
     const lines: Array<{
@@ -892,17 +1230,25 @@ export default function LiveMapInner({
           <MapLegend
             sitesWithCoords={sitesWithCoords}
             nfosWithCoords={nfosWithCoords}
+            warehouseCount={warehousesWithCoords.length}
+            showWarehouses={showWarehouses}
+            onToggleWarehouses={() => setShowWarehouses(!showWarehouses)}
             selectedNfoFilter={mapNfoFilter}
             onFilterChange={onMapNfoFilterChange}
           />
         </div>
 
-        {/* NFO Search */}
+        {/* NFO Search with Clear button */}
         <div style={{ flex: "0 0 auto" }}>
           <h3 style={{ marginTop: 0, marginBottom: "8px", fontSize: "13px", fontWeight: "bold" }}>
             👤 Search NFO
           </h3>
-          <NfoSearch nfosWithCoords={nfosWithCoords} />
+          <NfoSearch 
+            nfosWithCoords={nfosWithCoords} 
+            onNfoSelect={handleNfoSelectForTile}
+            selectedNfoUsername={selectedNfoForTile?.username ?? null}
+            onClear={handleClearNfoTile}
+          />
         </div>
 
         {/* Closest NFOs Panel */}
@@ -1072,6 +1418,183 @@ export default function LiveMapInner({
             </div>
           </div>
         )}
+
+        {/* Selected NFO Tile Panel - shows when an NFO is selected via search or marker click */}
+        {/* SAME FIELDS AS DASHBOARD ROW: Username, Name, On shift, Status, Ping Status, Activity, Site ID, Via warehouse, Warehouse, Nearest site, Air distance, Last active */}
+        {selectedNfoForTile && enrichedSelectedNfo && (
+          <div
+            style={{
+              flex: "0 0 auto",
+              backgroundColor: "white",
+              borderRadius: "8px",
+              border: "2px solid #22c55e",
+              padding: "12px",
+              marginTop: "auto",
+            }}
+          >
+            {/* Header with NFO name and close button */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+              <div style={{ fontWeight: "bold", fontSize: "14px", color: "#22c55e" }}>
+                👤 {enrichedSelectedNfo.name || enrichedSelectedNfo.username}
+              </div>
+              <button
+                onClick={handleClearNfoTile}
+                style={{
+                  background: "none",
+                  border: "none",
+                  fontSize: "16px",
+                  cursor: "pointer",
+                  color: "#999",
+                  padding: "0",
+                  width: "20px",
+                  height: "20px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+                title="Clear selection"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* NFO Details Grid - SAME FIELDS AS DASHBOARD */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px", fontSize: "11px", marginBottom: "10px" }}>
+              <div>
+                <span style={{ color: "#666" }}>Username:</span>{" "}
+                <span style={{ fontFamily: "monospace", fontWeight: "bold" }}>{enrichedSelectedNfo.username}</span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>On shift:</span>{" "}
+                <span style={{ fontWeight: "bold", color: enrichedSelectedNfo.on_shift ? "#22c55e" : "#666" }}>
+                  {enrichedSelectedNfo.on_shift ? "Yes" : "No"}
+                </span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Status:</span>{" "}
+                <span style={{ 
+                  fontWeight: "bold", 
+                  color: enrichedSelectedNfo.isBusy ? "#ef4444" : 
+                         enrichedSelectedNfo.isFree ? "#22c55e" : "#666"
+                }}>
+                  {enrichedSelectedNfo.status || "-"}
+                </span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Ping Status:</span>{" "}
+                {enrichedSelectedNfo.isNotActive ? (
+                  <span style={{ color: "#ef4444", fontWeight: "bold" }}>
+                    Not Active
+                    <span style={{ fontWeight: "normal", color: "#999", marginLeft: "4px", fontSize: "10px" }}>
+                      ({enrichedSelectedNfo.pingReason})
+                    </span>
+                  </span>
+                ) : (
+                  <span style={{ color: "#22c55e", fontWeight: "bold" }}>OK</span>
+                )}
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Activity:</span>{" "}
+                <span>{enrichedSelectedNfo.activity || "-"}</span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Site ID:</span>{" "}
+                <span style={{ fontFamily: "monospace" }}>{enrichedSelectedNfo.site_id?.trim() || "-"}</span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Via warehouse:</span>{" "}
+                <span style={{ fontWeight: enrichedSelectedNfo.via_warehouse ? "bold" : "normal" }}>
+                  {enrichedSelectedNfo.via_warehouse ? "Yes" : "-"}
+                </span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Warehouse:</span>{" "}
+                <span>{enrichedSelectedNfo.warehouse_name || "-"}</span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Nearest site:</span>{" "}
+                <span style={{ fontFamily: "monospace" }}>{enrichedSelectedNfo.nearestSiteId || "-"}</span>
+              </div>
+              <div>
+                <span style={{ color: "#666" }}>Air distance:</span>{" "}
+                <span style={{ color: "#ff9800", fontWeight: "bold" }}>
+                  {enrichedSelectedNfo.airDistanceKm != null 
+                    ? `${enrichedSelectedNfo.airDistanceKm.toFixed(2)} km` 
+                    : "-"}
+                </span>
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <span style={{ color: "#666" }}>Last active:</span>{" "}
+                <span style={{ fontSize: "10px" }}>
+                  {enrichedSelectedNfo.last_active_at
+                    ? new Date(enrichedSelectedNfo.last_active_at).toLocaleString()
+                    : "-"}
+                </span>
+              </div>
+            </div>
+
+            {/* Route Section */}
+            <div style={{ borderTop: "1px solid #e0e0e0", paddingTop: "10px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <button
+                  onClick={fetchRouteForNfoTile}
+                  disabled={nfoTileRouteLoading}
+                  style={{
+                    padding: "6px 16px",
+                    fontSize: "12px",
+                    backgroundColor: nfoTileRouteLoading ? "#ccc" : nfoTileRoute ? "#22c55e" : "#3388ff",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: "4px",
+                    cursor: nfoTileRouteLoading ? "not-allowed" : "pointer",
+                    fontWeight: "bold",
+                  }}
+                >
+                  {nfoTileRouteLoading ? "Calculating..." : nfoTileRoute ? "✓ Route Calculated" : "🚗 Calculate Route"}
+                </button>
+
+                {nfoTileRoute && (
+                  <button
+                    onClick={() => { setNfoTileRoute(null); setNfoTileRouteError(null); }}
+                    style={{
+                      padding: "6px 12px",
+                      fontSize: "12px",
+                      backgroundColor: "#f3f4f6",
+                      color: "#666",
+                      border: "1px solid #ddd",
+                      borderRadius: "4px",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Clear Route
+                  </button>
+                )}
+              </div>
+
+              {/* Route Error */}
+              {nfoTileRouteError && (
+                <div style={{ marginTop: "8px", color: "#ef4444", fontSize: "11px" }}>
+                  ⚠️ {nfoTileRouteError}
+                </div>
+              )}
+
+              {/* Route Result - SAME FORMAT AS DASHBOARD: "107.41 km, 77 min via Jeddah MC" */}
+              {nfoTileRoute && (
+                <div style={{ 
+                  marginTop: "8px", 
+                  padding: "8px", 
+                  backgroundColor: nfoTileRoute.isFallback ? "#fff7ed" : "#e8f5e9", 
+                  borderRadius: "4px",
+                  fontSize: "11px"
+                }}>
+                  <div style={{ fontWeight: "bold", color: nfoTileRoute.isFallback ? "#d97706" : "#2e7d32" }}>
+                    {formatRouteSummary(nfoTileRoute)}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Right Side Map: 65% */}
@@ -1115,6 +1638,18 @@ export default function LiveMapInner({
         />
       )}
 
+      {/* NFO Tile route polyline (purple, for selected NFO in detail tile) */}
+      {nfoTileRoute && nfoTileRoute.coordinates.length > 0 && (
+        <Polyline
+          key={`nfo-tile-route-${selectedNfoForTile?.username ?? 'selected'}`}
+          positions={nfoTileRoute.coordinates.map(([lng, lat]) => [lat, lng] as [number, number])}
+          color={nfoTileRoute.isFallback ? "#f59e0b" : "#8b5cf6"}
+          weight={5}
+          opacity={0.9}
+          dashArray={nfoTileRoute.isFallback ? "10,10" : undefined}
+        />
+      )}
+
       {/* NFO markers with status-based colors */}
       {filteredEnrichedNfos.map((enriched, nfoIdx) => {
         const minutesSinceActive = ageMinutes(enriched.last_active_at);
@@ -1140,66 +1675,98 @@ export default function LiveMapInner({
                 }, 300);
               }
             }}
+            eventHandlers={{
+              click: () => {
+                // Also set NFO for the detail tile at bottom
+                setSelectedNfoForTile(enriched);
+                setNfoTileRoute(null);
+                setNfoTileRouteError(null);
+              }
+            }}
           >
             <Popup>
-              <div className="text-xs space-y-1">
-                {/* NFO name + username */}
-                <div>
-                  <strong>{enriched.username}</strong>
-                  {enriched.name && ` – ${enriched.name}`}
+              <div className="text-xs space-y-1" style={{ minWidth: "200px" }}>
+                {/* SECTION 1: Name + Username + On-shift + Ping Status */}
+                <div className="font-semibold text-sm">
+                  {enriched.username}
+                  {enriched.name && <span className="font-normal"> – {enriched.name}</span>}
                 </div>
-
-                {/* Shift and Assignment status (new clear labels) */}
-                <div className={isOnShift ? "text-blue-600 font-semibold" : isOffShift ? "text-orange-600 font-semibold" : ""}>
-                  <strong>Shift:</strong> {shiftLabel}
-                </div>
-                <div className={isBusy ? "text-red-600 font-semibold" : isFree ? "text-green-600 font-semibold" : ""}>
-                  <strong>Assignment:</strong> {assignmentLabel}
-                </div>
-                
-                {/* Raw status and activity for reference */}
-                <div className="text-gray-500">Status: {enriched.status ?? "-"}</div>
-                <div className="text-gray-500">Activity: {enriched.activity ?? "-"}</div>
-                
-                {minutesSinceActive !== null && (
+                <div className="flex gap-4">
                   <div>
-                    Last active: {Math.round(minutesSinceActive)} min ago
+                    <span className="text-gray-500">On shift:</span>{" "}
+                    <span className={enriched.isOnShift ? "text-green-600 font-semibold" : "text-gray-600"}>
+                      {enriched.on_shift ? "Yes" : "No"}
+                    </span>
                   </div>
-                )}
-
-                {/* Site and distance info */}
-                {enriched.selectedSiteId ? (
-                  <div className="font-semibold text-blue-600 border-t pt-1 mt-1">
-                    <div>
-                      {isBusy ? "📍 Selected site:" : "🧭 Nearest site:"}
-                    </div>
-                    <div>
-                      {enriched.selectedSiteId}
-                      {enriched.selectedSiteName && ` – ${enriched.selectedSiteName}`}
-                      {enriched.selectedSiteArea && ` (${enriched.selectedSiteArea})`}
-                    </div>
-                    {enriched.selectedSiteDistanceKm !== null && (
-                      <div>
-                        Air distance:{" "}
-                        {enriched.selectedSiteDistanceKm.toFixed(1)} km
-                      </div>
+                  <div>
+                    <span className="text-gray-500">Ping:</span>{" "}
+                    {enriched.isNotActive ? (
+                      <span className="text-red-600 font-semibold">Not Active</span>
+                    ) : (
+                      <span className="text-green-600 font-semibold">OK</span>
                     )}
                   </div>
-                ) : (
-                  <div className="text-gray-500 border-t pt-1 mt-1">
-                    Nearest site: –
-                  </div>
-                )}
-
-                <div className="text-gray-500 text-xs border-t pt-1 mt-1">
-                  Last updated:{" "}
-                  {enriched.last_active_at
-                    ? new Date(enriched.last_active_at).toLocaleString()
-                    : "-"}
                 </div>
-                {enriched.home_location && (
-                  <div>Home area: {enriched.home_location}</div>
-                )}
+
+                {/* SECTION 2: Status + Activity */}
+                <div className="border-t pt-1 mt-1">
+                  <div>
+                    <span className="text-gray-500">Status:</span>{" "}
+                    <span className={enriched.isBusy ? "text-red-600 font-semibold" : enriched.isFree ? "text-green-600 font-semibold" : ""}>
+                      {enriched.status ?? "-"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Activity:</span>{" "}
+                    <span>{enriched.activity ?? "-"}</span>
+                  </div>
+                </div>
+
+                {/* SECTION 3: Site info - Site ID, Via warehouse, Warehouse, Nearest site, Air distance */}
+                <div className="border-t pt-1 mt-1">
+                  <div>
+                    <span className="text-gray-500">Site ID:</span>{" "}
+                    <span className="font-mono">{enriched.site_id?.trim() || "-"}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Via warehouse:</span>{" "}
+                    <span className={enriched.via_warehouse ? "text-orange-600 font-semibold" : ""}>
+                      {enriched.via_warehouse ? "Yes" : "-"}
+                    </span>
+                  </div>
+                  {enriched.warehouse_name && (
+                    <div>
+                      <span className="text-gray-500">Warehouse:</span>{" "}
+                      <span className="text-orange-600">{enriched.warehouse_name}</span>
+                    </div>
+                  )}
+                  <div>
+                    <span className="text-gray-500">Nearest site:</span>{" "}
+                    <span className="font-mono">{enriched.nearestSiteId ?? "-"}</span>
+                  </div>
+                  <div>
+                    <span className="text-gray-500">Air distance:</span>{" "}
+                    <span className="text-amber-600 font-semibold">
+                      {enriched.airDistanceKm != null ? `${enriched.airDistanceKm.toFixed(2)} km` : "-"}
+                    </span>
+                  </div>
+                </div>
+
+                {/* SECTION 4: Last active + Home area */}
+                <div className="border-t pt-1 mt-1 text-gray-500">
+                  <div>
+                    Last active:{" "}
+                    {enriched.last_active_at
+                      ? new Date(enriched.last_active_at).toLocaleString()
+                      : "-"}
+                    {minutesSinceActive !== null && (
+                      <span className="text-gray-400"> ({Math.round(minutesSinceActive)} min ago)</span>
+                    )}
+                  </div>
+                  {enriched.home_location && (
+                    <div>Home area: {enriched.home_location}</div>
+                  )}
+                </div>
               </div>
             </Popup>
           </Marker>
@@ -1249,6 +1816,32 @@ export default function LiveMapInner({
         </div>
       );
       })}
+
+      {/* Warehouse markers - orange, toggleable via legend */}
+      {showWarehouses && warehousesWithCoords.map((wh, whIdx) => (
+        <Marker
+          key={`warehouse-${wh.id}-${whIdx}`}
+          position={[wh.latitude as number, wh.longitude as number]}
+          icon={warehouseIcon}
+          zIndexOffset={500}
+        >
+          <Popup>
+            <div className="text-xs space-y-1" style={{ minWidth: "150px" }}>
+              <div className="font-semibold text-orange-600">
+                🏭 {wh.name}
+              </div>
+              {wh.region && (
+                <div>
+                  <span className="text-gray-500">Region:</span> {wh.region}
+                </div>
+              )}
+              <div className="text-gray-500">
+                Coords: {wh.latitude?.toFixed(4)}, {wh.longitude?.toFixed(4)}
+              </div>
+            </div>
+          </Popup>
+        </Marker>
+      ))}
 
       {/* Pulsing highlight circle for selected site */}
       {showHighlight && selectedSiteFromSearch && hasValidLocation({ lat: selectedSiteFromSearch.latitude, lng: selectedSiteFromSearch.longitude }) && (

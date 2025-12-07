@@ -2,6 +2,7 @@
 
 import dynamic from "next/dynamic";
 import type { NfoStatusRow, SiteRecord } from "../lib/nfoHelpers";
+import type { WarehouseRecord } from "./RoutePlanner";
 
 /**
  * Props for LiveMap component.
@@ -14,6 +15,7 @@ import type { NfoStatusRow, SiteRecord } from "../lib/nfoHelpers";
 type LiveMapProps = {
   nfos: NfoStatusRow[];
   sites: SiteRecord[];
+  warehouses: WarehouseRecord[];
   // Persisted map state - controlled by parent
   mapAreaFilter: string | null;        // "NFOs_ONLY", null (All Sites), or specific area name
   mapNfoFilter: string | null;         // null (all), "free", "busy", "on-shift", "off-shift"
