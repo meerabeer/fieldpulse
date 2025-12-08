@@ -17,19 +17,34 @@ type NfoRoutesViewProps = {
   nfos: NfoStatusRow[];
 };
 
-const defaultIcon = L.icon({
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-});
+// Create icon lazily only on client side to avoid SSR issues
+const createDefaultIcon = () =>
+  L.icon({
+    iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
+    iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
+    shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
+    iconSize: [25, 41],
+    iconAnchor: [12, 41],
+  });
 
 const ORS_BACKEND_URL =
   process.env.NEXT_PUBLIC_ORS_BACKEND_URL ??
   "https://meerabeer1990-nfo-ors-backend.hf.space";
 
 export default function NfoRoutesViewInner({ nfos }: NfoRoutesViewProps) {
+  // Client-only guard to prevent Leaflet initialization before DOM is ready
+  // This prevents "Cannot read properties of undefined (reading 'appendChild')" errors
+  const [isClient, setIsClient] = useState(false);
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
+  // Create icon only on client side
+  const defaultIcon = useMemo(() => {
+    if (!isClient) return null;
+    return createDefaultIcon();
+  }, [isClient]);
+
   const [sites, setSites] = useState<SiteCoordinate[]>([]);
   const [selectedUsername, setSelectedUsername] = useState<string>("");
   const [selectedSiteId, setSelectedSiteId] = useState<string>("");
@@ -245,49 +260,58 @@ export default function NfoRoutesViewInner({ nfos }: NfoRoutesViewProps) {
         )}
       </div>
 
-      {/* Map */}
+      {/* Map - only render when client is ready to prevent Leaflet init errors */}
       <div className="rounded-lg overflow-hidden border border-slate-200 shadow">
-        <MapContainer
-          center={mapCenter}
-          zoom={8}
-          style={{ height: "600px", width: "100%" }}
-        >
-          <TileLayer
-            attribution="&copy; OpenStreetMap contributors"
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
+        {isClient && defaultIcon ? (
+          <MapContainer
+            center={mapCenter}
+            zoom={8}
+            style={{ height: "600px", width: "100%" }}
+          >
+            <TileLayer
+              attribution="&copy; OpenStreetMap contributors"
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
 
-          {/* NFO marker */}
-          {selectedNfo && selectedNfo.lat !== null && selectedNfo.lng !== null && (
-            <Marker position={[selectedNfo.lat, selectedNfo.lng]} icon={defaultIcon}>
-              <Popup>
-                <div className="text-xs">
-                  <strong>{selectedNfo.username}</strong>
-                  <br />
-                  {selectedNfo.name}
-                  <br />
-                  Status: {selectedNfo.status ?? "-"}
-                </div>
-              </Popup>
-            </Marker>
-          )}
+            {/* NFO marker */}
+            {selectedNfo && selectedNfo.lat !== null && selectedNfo.lng !== null && (
+              <Marker position={[selectedNfo.lat, selectedNfo.lng]} icon={defaultIcon}>
+                <Popup>
+                  <div className="text-xs">
+                    <strong>{selectedNfo.username}</strong>
+                    <br />
+                    {selectedNfo.name}
+                    <br />
+                    Status: {selectedNfo.status ?? "-"}
+                  </div>
+                </Popup>
+              </Marker>
+            )}
 
-          {/* Site marker */}
-          {selectedSite && selectedSiteCoords && (
-            <Marker position={[selectedSiteCoords.lat, selectedSiteCoords.lon]}>
-              <Popup>
-                <div className="text-xs">
-                  <strong>Site: {selectedSite.site_id}</strong>
-                </div>
-              </Popup>
-            </Marker>
-          )}
+            {/* Site marker */}
+            {selectedSite && selectedSiteCoords && (
+              <Marker position={[selectedSiteCoords.lat, selectedSiteCoords.lon]}>
+                <Popup>
+                  <div className="text-xs">
+                    <strong>Site: {selectedSite.site_id}</strong>
+                  </div>
+                </Popup>
+              </Marker>
+            )}
 
-          {/* Route polyline */}
-          {routeCoords.length > 0 && (
-            <Polyline positions={routeCoords} color="blue" weight={2} />
-          )}
-        </MapContainer>
+            {/* Route polyline */}
+            {routeCoords.length > 0 && (
+              <Polyline positions={routeCoords} color="blue" weight={2} />
+            )}
+          </MapContainer>
+        ) : (
+          <div 
+            className="bg-slate-100 flex items-center justify-center"
+            style={{ height: "600px", width: "100%" }}
+          >
+            <p className="text-slate-500">Loading map...</p>
+          </div>
+        )}
       </div>
     </div>
   );
