@@ -16,6 +16,13 @@ export const ROUTE_SANITY_RATIO_THRESHOLD = 2.0;
 // Engine type for route source tracking
 export type RouteEngine = "ors" | "osrm";
 
+// Individual engine result (raw data from each engine)
+export interface EngineRouteData {
+  distanceKm: number;
+  durationMin: number;
+  coordinates: [number, number][]; // [lng, lat] pairs
+}
+
 // Result from calculateBestRoute
 export interface RouteResult {
   distanceKm: number;
@@ -25,6 +32,9 @@ export interface RouteResult {
   airDistanceKm: number;
   warning?: string;
   isFallback?: boolean; // true if both engines failed and we're showing air distance
+  // NEW: Raw results from both engines (for showing alternatives in UI)
+  orsResult?: EngineRouteData;
+  osrmResult?: EngineRouteData;
 }
 
 /**
@@ -251,6 +261,17 @@ export async function calculateBestRoute(
     coordinates: finalCoords,
     airDistanceKm,
     warning,
+    // Include raw results from both engines (if available) for UI alternatives
+    orsResult: orsResult ? {
+      distanceKm: orsResult.distanceKm,
+      durationMin: orsResult.durationMin,
+      coordinates: orsResult.coordinates,
+    } : undefined,
+    osrmResult: osrmResult ? {
+      distanceKm: osrmResult.distanceKm,
+      durationMin: osrmResult.durationMin,
+      coordinates: osrmResult.coordinates,
+    } : undefined,
   };
 }
 
@@ -369,12 +390,15 @@ export async function calculateRouteViaWarehouse(
   // If both legs used ORS → ORS; if any leg used OSRM → OSRM (fallback)
   const engine: RouteEngine = (leg1.engine === "ors" && leg2.engine === "ors") ? "ors" : "osrm";
 
-  // Step 7: Warning - compare total driving distance to direct NFO→Site air distance
-  const directRatio = totalKm / Math.max(directNfoSiteKm, 0.001);
+  // Step 7: Warning - compare total driving distance to SUM of leg air distances
+  // For via-warehouse routes, fair comparison is: driving vs (NFO→WH air + WH→Site air)
+  // NOT: driving vs direct NFO→Site (which ignores the warehouse detour)
+  const sumOfLegAirKm = leg1.airDistanceKm + leg2.airDistanceKm;
+  const viaWarehouseRatio = totalKm / Math.max(sumOfLegAirKm, 0.001);
   let warning: string | undefined;
 
-  if (directRatio > ROUTE_SANITY_RATIO_THRESHOLD) {
-    warning = `Driving distance is ${totalKm.toFixed(1)} km vs straight-line ${directNfoSiteKm.toFixed(1)} km. Map data may be inaccurate in this area.`;
+  if (viaWarehouseRatio > ROUTE_SANITY_RATIO_THRESHOLD) {
+    warning = `Driving distance is ${totalKm.toFixed(1)} km vs straight-line ${sumOfLegAirKm.toFixed(1)} km (NFO→WH + WH→Site). Map data may be inaccurate in this area.`;
   }
 
   // Also inherit warnings from individual legs if they had issues
@@ -388,10 +412,67 @@ export async function calculateRouteViaWarehouse(
     engine,
     totalKm,
     totalMin,
-    directRatio,
+    sumOfLegAirKm,
+    viaWarehouseRatio,
     hasWarning: !!warning,
     leg1Engine: leg1.engine,
     leg2Engine: leg2.engine,
+  });
+
+  // Step 8: Build combined ORS and OSRM results for alternative switching
+  // Combine ORS results from both legs (if both have ORS data)
+  let combinedOrsResult: EngineRouteData | undefined;
+  if (leg1.orsResult && leg2.orsResult) {
+    // Combine coordinates, avoiding duplicate warehouse point
+    const orsCoords = [...leg1.orsResult.coordinates];
+    if (leg2.orsResult.coordinates.length > 0) {
+      const leg2Start = leg2.orsResult.coordinates[0];
+      const leg1End = leg1.orsResult.coordinates[leg1.orsResult.coordinates.length - 1];
+      const isSamePoint = leg1End && leg2Start &&
+        Math.abs(leg1End[0] - leg2Start[0]) < 0.0001 &&
+        Math.abs(leg1End[1] - leg2Start[1]) < 0.0001;
+      if (isSamePoint) {
+        orsCoords.push(...leg2.orsResult.coordinates.slice(1));
+      } else {
+        orsCoords.push(...leg2.orsResult.coordinates);
+      }
+    }
+    combinedOrsResult = {
+      distanceKm: leg1.orsResult.distanceKm + leg2.orsResult.distanceKm,
+      durationMin: leg1.orsResult.durationMin + leg2.orsResult.durationMin,
+      coordinates: orsCoords,
+    };
+  }
+
+  // Combine OSRM results from both legs (if both have OSRM data)
+  let combinedOsrmResult: EngineRouteData | undefined;
+  if (leg1.osrmResult && leg2.osrmResult) {
+    // Combine coordinates, avoiding duplicate warehouse point
+    const osrmCoords = [...leg1.osrmResult.coordinates];
+    if (leg2.osrmResult.coordinates.length > 0) {
+      const leg2Start = leg2.osrmResult.coordinates[0];
+      const leg1End = leg1.osrmResult.coordinates[leg1.osrmResult.coordinates.length - 1];
+      const isSamePoint = leg1End && leg2Start &&
+        Math.abs(leg1End[0] - leg2Start[0]) < 0.0001 &&
+        Math.abs(leg1End[1] - leg2Start[1]) < 0.0001;
+      if (isSamePoint) {
+        osrmCoords.push(...leg2.osrmResult.coordinates.slice(1));
+      } else {
+        osrmCoords.push(...leg2.osrmResult.coordinates);
+      }
+    }
+    combinedOsrmResult = {
+      distanceKm: leg1.osrmResult.distanceKm + leg2.osrmResult.distanceKm,
+      durationMin: leg1.osrmResult.durationMin + leg2.osrmResult.durationMin,
+      coordinates: osrmCoords,
+    };
+  }
+
+  console.log("routing.ts via-warehouse alternatives:", {
+    hasOrsResult: !!combinedOrsResult,
+    hasOsrmResult: !!combinedOsrmResult,
+    orsKm: combinedOrsResult?.distanceKm,
+    osrmKm: combinedOsrmResult?.distanceKm,
   });
 
   return {
@@ -399,10 +480,14 @@ export async function calculateRouteViaWarehouse(
     durationMin: totalMin,
     engine,
     coordinates: combinedCoordinates,
-    airDistanceKm: directNfoSiteKm,
+    // Use sum of leg air distances for fair comparison (not direct NFO→Site)
+    airDistanceKm: sumOfLegAirKm,
     warning,
     isFallback: false,
     legs: [leg1, leg2],
+    // Include combined alternatives for UI switching
+    orsResult: combinedOrsResult,
+    osrmResult: combinedOsrmResult,
   };
 }
 

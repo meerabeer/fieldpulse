@@ -17,6 +17,12 @@ import {
   computePingStatus,
 } from "../lib/nfoHelpers";
 import type { WarehouseRecord } from "./RoutePlanner";
+import {
+  calculateBestRoute,
+  calculateRouteViaWarehouse,
+  type RouteResult,
+  type RouteEngine,
+} from "../lib/routing";
 
 const PAGE_SIZE = 1000;
 
@@ -559,6 +565,9 @@ type RouteInfo = {
   coordinates: [number, number][]; // [lng, lat] pairs from ORS
   distanceMeters: number;
   durationSeconds: number;
+  engine?: RouteEngine; // "ors" or "osrm" - which engine produced this route
+  warning?: string;     // Warning if route seems suspicious (> 2× air distance)
+  isFallback?: boolean; // true if both engines failed
 };
 
 // Route result for NFO tile (similar to dashboard)
@@ -568,6 +577,8 @@ type NfoTileRouteResult = {
   coordinates: [number, number][]; // [lng, lat] pairs for polyline
   viaWarehouse: string | null;
   isFallback?: boolean;
+  engine?: RouteEngine;  // "ors" or "osrm" - which engine produced this route
+  warning?: string;      // Warning if route seems suspicious (> 2× air distance)
 };
 
 // Helper for case-insensitive warehouse name matching (same as dashboard)
@@ -577,6 +588,7 @@ const namesMatch = (a: string | null, b: string | null): boolean => {
 };
 
 // Format route summary - SAME FORMAT AS DASHBOARD: "107.41 km, 77 min via Jeddah MC"
+// Now includes engine indicator: ORS or OSRM (fallback)
 const formatRouteSummary = (result: NfoTileRouteResult): string => {
   const distStr = result.distanceKm.toFixed(2);
   
@@ -588,12 +600,13 @@ const formatRouteSummary = (result: NfoTileRouteResult): string => {
     return `📏 ${distStr} km (air)`;
   }
   
-  // Normal ORS route: show distance and ETA
+  // Normal route: show distance and ETA with engine indicator
   const durationStr = Math.round(result.durationMin ?? 0);
+  const engineLabel = result.engine === "osrm" ? " [OSRM]" : "";
   if (result.viaWarehouse) {
-    return `🚗 ${distStr} km, ${durationStr} min via ${result.viaWarehouse}`;
+    return `🚗 ${distStr} km, ${durationStr} min via ${result.viaWarehouse}${engineLabel}`;
   }
-  return `🚗 ${distStr} km, ${durationStr} min`;
+  return `🚗 ${distStr} km, ${durationStr} min${engineLabel}`;
 };
 
 export default function LiveMapInner({ 
@@ -924,7 +937,7 @@ export default function LiveMapInner({
       .map((item) => item);
   }, [selectedSiteFromSearch, enrichedNfos]);
 
-  // Fetch driving route from ORS backend
+  // Fetch driving route using shared ORS+OSRM comparison logic (same as Route Planner)
   const fetchRoute = useCallback(async (nfo: typeof enrichedNfos[0]) => {
     if (!selectedSiteFromSearch || !hasValidLocation({ lat: selectedSiteFromSearch.latitude, lng: selectedSiteFromSearch.longitude })) {
       return;
@@ -933,60 +946,37 @@ export default function LiveMapInner({
       return;
     }
 
-    const baseUrl = process.env.NEXT_PUBLIC_ORS_BACKEND_URL || "https://meerabeer1990-nfo-ors-backend.hf.space";
-
     // Clear previous route and set loading state
     setActiveRoute(null);
     setRouteError(null);
     setRouteLoading(nfo.username);
 
     try {
-      const startLng = nfo.lng as number;
       const startLat = nfo.lat as number;
-      const endLng = selectedSiteFromSearch.longitude as number;
+      const startLon = nfo.lng as number;
       const endLat = selectedSiteFromSearch.latitude as number;
+      const endLon = selectedSiteFromSearch.longitude as number;
 
-      // Use the correct ORS backend endpoint with query parameters
-      // Include maximum_search_radius to handle off-road sites (5 km)
-      const params = new URLSearchParams({
-        start_lon: String(startLng),
-        start_lat: String(startLat),
-        end_lon: String(endLng),
-        end_lat: String(endLat),
-        profile: "driving-car",
-        maximum_search_radius: "5000", // 5 km - handle off-road sites
+      // Use shared routing helper (compares ORS vs OSRM, picks best engine)
+      const result: RouteResult = await calculateBestRoute(startLat, startLon, endLat, endLon);
+
+      console.log("Live Map Top-5 route result:", {
+        username: nfo.username,
+        engine: result.engine,
+        distanceKm: result.distanceKm,
+        durationMin: result.durationMin,
+        isFallback: result.isFallback,
+        hasWarning: !!result.warning,
       });
-
-      const url = `${baseUrl}/route?${params}`;
-      
-      const response = await fetch(url, {
-        headers: {
-          "Content-Type": "application/json",
-        },
-      });
-      
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      // Extract route geometry and summary from ORS response
-      const feature = data.features?.[0];
-      if (!feature) {
-        throw new Error("No route found");
-      }
-
-      const coordinates = feature.geometry?.coordinates as [number, number][] || [];
-      const summary = feature.properties?.summary;
-      const distanceMeters = summary?.distance ?? 0;
-      const durationSeconds = summary?.duration ?? 0;
 
       setActiveRoute({
         nfoUsername: nfo.username,
-        coordinates,
-        distanceMeters,
-        durationSeconds,
+        coordinates: result.coordinates,
+        distanceMeters: result.distanceKm * 1000, // Convert back to meters for existing display logic
+        durationSeconds: result.durationMin * 60, // Convert back to seconds for existing display logic
+        engine: result.engine,
+        warning: result.warning,
+        isFallback: result.isFallback,
       });
     } catch (error) {
       console.error("Route fetch error:", error);
@@ -1019,7 +1009,7 @@ export default function LiveMapInner({
     setNfoTileRouteError(null);
   }, []);
 
-  // Fetch route for the selected NFO tile (uses /api/ors-route like dashboard)
+  // Fetch route for the selected NFO tile using shared ORS+OSRM comparison logic
   // SAME LOGIC AS DASHBOARD: NFO -> (optional Warehouse) -> Site
   const fetchRouteForNfoTile = useCallback(async () => {
     if (!selectedNfoForTile) return;
@@ -1059,8 +1049,10 @@ export default function LiveMapInner({
     setNfoTileRoute(null);
 
     try {
-      const nfoPoint = { lat: selectedNfoForTile.lat!, lng: selectedNfoForTile.lng! };
-      const sitePoint = { lat: targetSite.latitude!, lng: targetSite.longitude! };
+      const nfoLat = selectedNfoForTile.lat!;
+      const nfoLon = selectedNfoForTile.lng!;
+      const siteLat = targetSite.latitude!;
+      const siteLon = targetSite.longitude!;
 
       // Check if we should route via warehouse (SAME as dashboard)
       const warehouseNameTrimmed = (selectedNfoForTile.warehouse_name ?? "").trim();
@@ -1071,66 +1063,54 @@ export default function LiveMapInner({
           )
         : null;
 
-      // Build coordinates array: NFO -> (optional Warehouse) -> Site
-      // Format: [lng, lat] pairs as ORS expects
-      const coords: [number, number][] = [[nfoPoint.lng, nfoPoint.lat]];
-      if (matchingWarehouse) {
-        coords.push([matchingWarehouse.longitude!, matchingWarehouse.latitude!]);
-      }
-      coords.push([sitePoint.lng, sitePoint.lat]);
-
       console.log("NFO Tile route request:", {
         username: selectedNfoForTile.username,
-        nfo: nfoPoint,
+        nfo: { lat: nfoLat, lng: nfoLon },
         warehouse: matchingWarehouse ? { lat: matchingWarehouse.latitude, lng: matchingWarehouse.longitude, name: matchingWarehouse.name } : null,
-        site: { ...sitePoint, id: targetSite.site_id },
-        coordsArray: coords,
+        site: { lat: siteLat, lng: siteLon, id: targetSite.site_id },
+        viaWarehouse: !!matchingWarehouse,
       });
 
-      // Call our API route which handles ORS with increased search radius
-      const response = await fetch("/api/ors-route", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          coordinates: coords,
-          profile: "driving-car",
-        }),
-      });
+      let result: RouteResult;
 
-      const data = await response.json();
-      console.log("NFO Tile route response:", data);
-
-      // Check if ORS could build a route
-      if (!data.ok) {
-        // Fallback: use air distance (with warehouse if applicable)
-        // Get the enriched NFO which has pre-computed airDistanceKm
-        const enriched = enrichedNfos.find(n => n.username === selectedNfoForTile.username);
-        const fallbackDistance = enriched?.airDistanceKm ?? calculateDistanceKm(nfoPoint, sitePoint);
-        
-        setNfoTileRoute({
-          distanceKm: fallbackDistance,
-          durationMin: null,
-          coordinates: coords,
-          viaWarehouse: matchingWarehouse ? matchingWarehouse.name : null,
-          isFallback: true,
-        });
-        return;
+      if (matchingWarehouse) {
+        // Route via warehouse using shared helper (per-leg ORS+OSRM comparison)
+        const warehouseLat = matchingWarehouse.latitude!;
+        const warehouseLon = matchingWarehouse.longitude!;
+        result = await calculateRouteViaWarehouse(
+          nfoLat, nfoLon,
+          warehouseLat, warehouseLon,
+          siteLat, siteLon
+        );
+      } else {
+        // Direct route using shared helper (ORS vs OSRM comparison)
+        result = await calculateBestRoute(nfoLat, nfoLon, siteLat, siteLon);
       }
 
-      // Success - use the route from ORS
+      console.log("NFO Tile route result:", {
+        username: selectedNfoForTile.username,
+        engine: result.engine,
+        distanceKm: result.distanceKm,
+        durationMin: result.durationMin,
+        isFallback: result.isFallback,
+        hasWarning: !!result.warning,
+      });
+
       setNfoTileRoute({
-        distanceKm: data.route.distanceMeters / 1000,
-        durationMin: data.route.durationSeconds / 60,
-        coordinates: data.route.coordinates,
+        distanceKm: result.distanceKm,
+        durationMin: result.isFallback ? null : result.durationMin,
+        coordinates: result.coordinates,
         viaWarehouse: matchingWarehouse ? matchingWarehouse.name : null,
-        isFallback: false,
+        isFallback: result.isFallback,
+        engine: result.engine,
+        warning: result.warning,
       });
     } catch (err) {
       setNfoTileRouteError(err instanceof Error ? err.message : "Route failed");
     } finally {
       setNfoTileRouteLoading(false);
     }
-  }, [selectedNfoForTile, sites, warehouses, enrichedNfos]);
+  }, [selectedNfoForTile, sites, warehouses]);
 
   // Get enriched data for the selected NFO tile
   const enrichedSelectedNfo = useMemo(() => {
@@ -1396,19 +1376,35 @@ export default function LiveMapInner({
                       <div style={{ 
                         marginTop: "6px", 
                         padding: "6px", 
-                        backgroundColor: "#e8f5e9", 
+                        backgroundColor: activeRoute.isFallback ? "#fff7ed" : "#e8f5e9", 
                         borderRadius: "4px",
                         fontSize: "10px"
                       }}>
-                        <div style={{ fontWeight: "bold", color: "#2e7d32", marginBottom: "2px" }}>
-                          🚗 Driving Route
+                        <div style={{ fontWeight: "bold", color: activeRoute.isFallback ? "#d97706" : "#2e7d32", marginBottom: "2px" }}>
+                          {activeRoute.isFallback ? "📏" : "🚗"} {activeRoute.isFallback ? "Air Distance" : "Driving Route"}{" "}
+                          {!activeRoute.isFallback && (
+                            activeRoute.engine === "osrm" ? (
+                              <span style={{ color: "#7c3aed", fontWeight: "600" }}>[OSRM fallback]</span>
+                            ) : (
+                              <span style={{ color: "#059669", fontWeight: "600" }}>[ORS]</span>
+                            )
+                          )}
                         </div>
                         <div style={{ color: "#333" }}>
                           <span style={{ fontWeight: "bold" }}>Distance:</span> {(activeRoute.distanceMeters / 1000).toFixed(2)} km
+                          {activeRoute.isFallback && " (straight-line)"}
                         </div>
-                        <div style={{ color: "#333" }}>
-                          <span style={{ fontWeight: "bold" }}>ETA:</span> {Math.round(activeRoute.durationSeconds / 60)} min
-                        </div>
+                        {!activeRoute.isFallback && (
+                          <div style={{ color: "#333" }}>
+                            <span style={{ fontWeight: "bold" }}>ETA:</span> {Math.round(activeRoute.durationSeconds / 60)} min
+                          </div>
+                        )}
+                        {/* Warning if route seems suspicious */}
+                        {activeRoute.warning && (
+                          <div style={{ marginTop: "4px", padding: "4px", backgroundColor: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "4px", color: "#c2410c", fontSize: "9px" }}>
+                            ⚠️ {activeRoute.warning}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
@@ -1579,6 +1575,7 @@ export default function LiveMapInner({
               )}
 
               {/* Route Result - SAME FORMAT AS DASHBOARD: "107.41 km, 77 min via Jeddah MC" */}
+              {/* Now includes engine indicator and warning */}
               {nfoTileRoute && (
                 <div style={{ 
                   marginTop: "8px", 
@@ -1590,6 +1587,23 @@ export default function LiveMapInner({
                   <div style={{ fontWeight: "bold", color: nfoTileRoute.isFallback ? "#d97706" : "#2e7d32" }}>
                     {formatRouteSummary(nfoTileRoute)}
                   </div>
+                  {/* Engine label row */}
+                  {!nfoTileRoute.isFallback && (
+                    <div style={{ marginTop: "4px", fontSize: "10px" }}>
+                      Engine:{" "}
+                      {nfoTileRoute.engine === "osrm" ? (
+                        <span style={{ color: "#7c3aed", fontWeight: "600" }}>OSRM (fallback)</span>
+                      ) : (
+                        <span style={{ color: "#059669", fontWeight: "600" }}>ORS</span>
+                      )}
+                    </div>
+                  )}
+                  {/* Warning if route seems suspicious */}
+                  {nfoTileRoute.warning && (
+                    <div style={{ marginTop: "6px", padding: "6px", backgroundColor: "#fff7ed", border: "1px solid #fed7aa", borderRadius: "4px", color: "#c2410c", fontSize: "10px" }}>
+                      ⚠️ {nfoTileRoute.warning}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

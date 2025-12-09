@@ -10,6 +10,7 @@ import {
   type RouteResult as SharedRouteResult,
   type MultiLegRouteResult,
   type RouteEngine,
+  type EngineRouteData,
   ROUTE_SANITY_RATIO_THRESHOLD,
 } from "../lib/routing";
 
@@ -53,6 +54,9 @@ export type RouteResult = {
   isFallback?: boolean; // True if routing engines couldn't find route
   engine?: RouteEngine; // Which routing engine produced this result
   directDistanceKm?: number; // Straight-line distance for comparison
+  // NEW: Alternative engine results for switching
+  orsResult?: EngineRouteData;
+  osrmResult?: EngineRouteData;
 };
 
 export type RoutePlannerState = {
@@ -247,13 +251,15 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
       let result: SharedRouteResult;
 
       if (hasWarehouse) {
-        // Route via warehouse - uses ORS+OSRM comparison per leg
-        const coords: [number, number][] = [
-          [selectedNfo.lng!, selectedNfo.lat!],
-          [selectedWarehouse.longitude!, selectedWarehouse.latitude!],
-          [selectedSite.longitude!, selectedSite.latitude!],
-        ];
-        result = await calculateRouteWithWaypoints(coords);
+        // Route via warehouse - uses ORS+OSRM comparison per leg with combined alternatives
+        result = await calculateRouteViaWarehouse(
+          selectedNfo.lat!,
+          selectedNfo.lng!,
+          selectedWarehouse.latitude!,
+          selectedWarehouse.longitude!,
+          selectedSite.latitude!,
+          selectedSite.longitude!
+        );
       } else {
         // Direct route - use best route comparison (ORS vs OSRM)
         result = await calculateBestRoute(
@@ -265,6 +271,8 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
       }
 
       console.log("RoutePlanner route result:", result);
+      console.log("RoutePlanner ORS result:", result.orsResult);
+      console.log("RoutePlanner OSRM result:", result.osrmResult);
 
       // Set warning if present
       setRouteWarning(result.warning ?? null);
@@ -283,6 +291,9 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
           isFallback: result.isFallback ?? false,
           engine: result.engine,
           directDistanceKm: result.airDistanceKm,
+          // Pass through raw engine results for alternative switching
+          orsResult: result.orsResult,
+          osrmResult: result.osrmResult,
         },
       });
     } catch (error) {
@@ -293,6 +304,37 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
       setRouteLoading(false);
     }
   }, [canRoute, selectedNfo, selectedSite, selectedWarehouse, updateState]);
+
+  // Switch to alternative engine (ORS ↔ OSRM)
+  const switchToAlternativeEngine = useCallback((targetEngine: RouteEngine) => {
+    if (!routeResult) return;
+    
+    const alternativeData = targetEngine === "osrm" ? routeResult.osrmResult : routeResult.orsResult;
+    if (!alternativeData) return;
+    
+    // Calculate new warning based on alternative route
+    const airKm = routeResult.directDistanceKm ?? 0;
+    const ratio = alternativeData.distanceKm / Math.max(airKm, 0.001);
+    const newWarning = ratio > ROUTE_SANITY_RATIO_THRESHOLD
+      ? `Driving distance is ${alternativeData.distanceKm.toFixed(1)} km vs straight-line ${airKm.toFixed(1)} km. Map data may be inaccurate in this area.`
+      : null;
+    
+    setRouteWarning(newWarning);
+    
+    // Update route result with alternative engine's data
+    updateState({
+      routeResult: {
+        ...routeResult,
+        coordinates: alternativeData.coordinates,
+        distanceMeters: alternativeData.distanceKm * 1000,
+        durationSeconds: alternativeData.durationMin * 60,
+        engine: targetEngine,
+      },
+    });
+    
+    // Fit to new route
+    setRouteFitToken((t) => t + 1);
+  }, [routeResult, updateState]);
 
   // Clear all selections and route
   const handleClearRoute = useCallback(() => {
@@ -309,6 +351,60 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
     // Increment fit token so next Route click will fit to bounds
     setRouteFitToken((t) => t + 1);
   }, [updateState]);
+
+  // Compute alternative route info (if available)
+  const alternativeRoute = useMemo(() => {
+    if (!routeResult || routeResult.isFallback) return null;
+    
+    const currentEngine = routeResult.engine;
+    const alternativeEngine = currentEngine === "ors" ? "osrm" : "ors";
+    const alternativeData = alternativeEngine === "osrm" ? routeResult.osrmResult : routeResult.orsResult;
+    
+    console.log("alternativeRoute check:", {
+      currentEngine,
+      alternativeEngine,
+      hasAlternativeData: !!alternativeData,
+      alternativeData,
+    });
+    
+    if (!alternativeData) return null;
+    
+    // Calculate if alternative looks different enough to show (> 10% difference)
+    const currentKm = routeResult.distanceMeters / 1000;
+    const altKm = alternativeData.distanceKm;
+    const diffPercent = Math.abs(currentKm - altKm) / Math.max(currentKm, 0.001) * 100;
+    
+    // Also check if current route has warning but alternative doesn't
+    const airKm = routeResult.directDistanceKm ?? 0;
+    const altRatio = altKm / Math.max(airKm, 0.001);
+    const altHasWarning = altRatio > ROUTE_SANITY_RATIO_THRESHOLD;
+    const currentHasWarning = !!routeWarning;
+    
+    console.log("alternativeRoute decision:", {
+      currentKm,
+      altKm,
+      diffPercent,
+      airKm,
+      altRatio,
+      altHasWarning,
+      currentHasWarning,
+    });
+    
+    // Show alternative if: 
+    // 1. Current has warning (always show alternative when route looks suspicious)
+    // 2. OR significant difference (> 10%)
+    const shouldShow = currentHasWarning || diffPercent > 10;
+    
+    if (!shouldShow) return null;
+    
+    return {
+      engine: alternativeEngine as RouteEngine,
+      distanceKm: altKm,
+      durationMin: alternativeData.durationMin,
+      hasWarning: altHasWarning,
+      isRecommended: currentHasWarning && !altHasWarning, // Alternative looks better
+    };
+  }, [routeResult, routeWarning]);
 
   // Format duration
   const formatDuration = (seconds: number): string => {
@@ -506,6 +602,42 @@ export default function RoutePlanner({ nfos, sites, warehouses, state, onStateCh
             {routeWarning && (
               <div className="bg-orange-50 border border-orange-200 rounded-lg p-2 text-xs text-orange-700">
                 ⚠️ {routeWarning}
+              </div>
+            )}
+
+            {/* Alternative route option */}
+            {alternativeRoute && (
+              <div className={`rounded-lg p-3 text-xs ${
+                alternativeRoute.isRecommended 
+                  ? "bg-purple-50 border-2 border-purple-300" 
+                  : "bg-slate-50 border border-slate-200"
+              }`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className={`font-semibold ${
+                    alternativeRoute.isRecommended ? "text-purple-700" : "text-slate-700"
+                  }`}>
+                    {alternativeRoute.isRecommended ? "💡 Recommended:" : "Alternative:"}{" "}
+                    {alternativeRoute.engine === "osrm" ? "OSRM" : "ORS"} route
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600 mb-2">
+                  <span>
+                    {alternativeRoute.distanceKm.toFixed(1)} km, {Math.round(alternativeRoute.durationMin)} min
+                  </span>
+                  {alternativeRoute.hasWarning && (
+                    <span className="text-orange-600 text-[10px]">⚠️ Also suspicious</span>
+                  )}
+                </div>
+                <button
+                  onClick={() => switchToAlternativeEngine(alternativeRoute.engine)}
+                  className={`w-full py-1.5 rounded font-medium text-xs transition ${
+                    alternativeRoute.isRecommended
+                      ? "bg-purple-600 text-white hover:bg-purple-700"
+                      : "bg-slate-200 text-slate-700 hover:bg-slate-300"
+                  }`}
+                >
+                  Use {alternativeRoute.engine === "osrm" ? "OSRM" : "ORS"} instead
+                </button>
               </div>
             )}
 
