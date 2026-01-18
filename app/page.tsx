@@ -18,11 +18,12 @@ import {
 import LiveMap from "./components/LiveMap";
 import NfoRoutesView from "./components/NfoRoutesView";
 import RoutePlanner from "./components/RoutePlanner";
+import ClusterPlanner from "./components/ClusterPlanner";
 import type { WarehouseRecord, RoutePlannerState } from "./components/RoutePlanner";
-import { 
-  calculateBestRoute, 
-  calculateRouteViaWarehouse, 
-  type RouteResult as SharedRouteResult, 
+import {
+  calculateBestRoute,
+  calculateRouteViaWarehouse,
+  type RouteResult as SharedRouteResult,
   type RouteEngine,
   type EngineRouteData,
   ROUTE_SANITY_RATIO_THRESHOLD,
@@ -104,7 +105,7 @@ type StatusFilter =
 
 type KpiCategory = "total" | "onShift" | "busy" | "free" | "offShift" | "notActive";
 
-type View = "dashboard" | "map" | "routes" | "routePlanner" | "settings";
+type View = "dashboard" | "map" | "routes" | "routePlanner" | "clusterPlanner" | "settings";
 
 // Helper to safely read from localStorage (client-side only)
 function getStoredValue<T>(key: string, fallback: T): T {
@@ -195,9 +196,9 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
       const warehouseNameTrimmed = (enriched.warehouse_name ?? "").trim();
       const matchingWarehouse = enriched.via_warehouse && warehouseNameTrimmed
         ? warehouses.find(w =>
-            namesMatch(w.name, warehouseNameTrimmed) &&
-            hasValidLocation({ lat: w.latitude, lng: w.longitude })
-          )
+          namesMatch(w.name, warehouseNameTrimmed) &&
+          hasValidLocation({ lat: w.latitude, lng: w.longitude })
+        )
         : null;
 
       // Debug logging
@@ -258,17 +259,17 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
   // Switch to alternative engine (ORS ↔ OSRM)
   const switchToAlternativeEngine = (targetEngine: RouteEngine) => {
     if (!routeResult) return;
-    
+
     const alternativeData = targetEngine === "osrm" ? routeResult.osrmResult : routeResult.orsResult;
     if (!alternativeData) return;
-    
+
     // Calculate new warning based on alternative route
     const airKm = routeResult.airDistanceKm ?? 0;
     const ratio = alternativeData.distanceKm / Math.max(airKm, 0.001);
     const newWarning = ratio > ROUTE_SANITY_RATIO_THRESHOLD
       ? `Driving distance is ${alternativeData.distanceKm.toFixed(1)} km vs straight-line ${airKm.toFixed(1)} km. Map data may be inaccurate in this area.`
       : undefined;
-    
+
     // Update route result with alternative engine's data
     setRouteResult({
       ...routeResult,
@@ -282,29 +283,29 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
   // Compute alternative route info (if available)
   const alternativeRoute = useMemo(() => {
     if (!routeResult || routeResult.isFallback) return null;
-    
+
     const currentEngine = routeResult.engine;
     const alternativeEngine = currentEngine === "ors" ? "osrm" : "ors";
     const alternativeData = alternativeEngine === "osrm" ? routeResult.osrmResult : routeResult.orsResult;
-    
+
     if (!alternativeData) return null;
-    
+
     // Calculate if alternative looks different enough to show
     const currentKm = routeResult.distanceKm;
     const altKm = alternativeData.distanceKm;
     const diffPercent = Math.abs(currentKm - altKm) / Math.max(currentKm, 0.001) * 100;
-    
+
     // Check if alternative has warning
     const airKm = routeResult.airDistanceKm ?? 0;
     const altRatio = altKm / Math.max(airKm, 0.001);
     const altHasWarning = altRatio > ROUTE_SANITY_RATIO_THRESHOLD;
     const currentHasWarning = !!routeResult.warning;
-    
+
     // Show alternative if: current has warning OR significant difference (> 10%)
     const shouldShow = currentHasWarning || diffPercent > 10;
-    
+
     if (!shouldShow) return null;
-    
+
     return {
       engine: alternativeEngine as RouteEngine,
       distanceKm: altKm,
@@ -317,7 +318,7 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
   // Format route summary
   const formatRouteSummary = (result: RowRouteResult): string => {
     const distStr = result.distanceKm.toFixed(2);
-    
+
     if (result.isFallback) {
       // Fallback: show air distance only, no ETA
       if (result.viaWarehouse) {
@@ -325,11 +326,11 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
       }
       return `${distStr} km (air)`;
     }
-    
+
     // Normal route: show distance, ETA, and engine
     const durationStr = Math.round(result.durationMin ?? 0);
     const engineStr = result.engine ? ` (${result.engine.toUpperCase()})` : "";
-    
+
     if (result.viaWarehouse) {
       return `${distStr} km, ${durationStr} min${engineStr} via ${result.viaWarehouse}`;
     }
@@ -391,11 +392,10 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
               )}
               {/* Alternative route option */}
               {alternativeRoute && (
-                <div className={`mt-1 p-1.5 rounded text-[10px] ${
-                  alternativeRoute.isRecommended 
-                    ? "bg-purple-50 border border-purple-200" 
-                    : "bg-gray-50 border border-gray-200"
-                }`}>
+                <div className={`mt-1 p-1.5 rounded text-[10px] ${alternativeRoute.isRecommended
+                  ? "bg-purple-50 border border-purple-200"
+                  : "bg-gray-50 border border-gray-200"
+                  }`}>
                   <div className="flex items-center justify-between gap-2">
                     <span className={alternativeRoute.isRecommended ? "text-purple-700" : "text-gray-600"}>
                       {alternativeRoute.isRecommended ? "💡" : "Alt:"} {alternativeRoute.engine.toUpperCase()}: {alternativeRoute.distanceKm.toFixed(1)} km, {Math.round(alternativeRoute.durationMin)} min
@@ -403,11 +403,10 @@ function FieldEngineerRow({ enriched, sites, warehouses }: FieldEngineerRowProps
                     </span>
                     <button
                       onClick={() => switchToAlternativeEngine(alternativeRoute.engine)}
-                      className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${
-                        alternativeRoute.isRecommended
-                          ? "bg-purple-600 text-white hover:bg-purple-700"
-                          : "bg-gray-200 text-gray-700 hover:bg-gray-300"
-                      }`}
+                      className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${alternativeRoute.isRecommended
+                        ? "bg-purple-600 text-white hover:bg-purple-700"
+                        : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                        }`}
                     >
                       Use
                     </button>
@@ -436,22 +435,22 @@ export default function HomePage() {
   // ============================================================
   // UI STATE - Persisted across hard refresh via localStorage
   // ============================================================
-  
+
   // Dashboard state
   const [activeView, setActiveView] = useState<View>("dashboard");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [areaFilter, setAreaFilter] = useState<string>("all");
-  
+
   // Live Map state (persisted so it survives tab switching and F5)
   // mapAreaFilter: "NFOs_ONLY" (default), null (All Sites), or specific area name
   const [mapAreaFilter, setMapAreaFilter] = useState<string | null>("NFOs_ONLY");
   // mapNfoFilter: null (show all NFOs), "free", "busy", "on-shift", or "off-shift"
   const [mapNfoFilter, setMapNfoFilter] = useState<string | null>(null);
-  
+
   // Active KPI category for the NFO list panel
   const [activeKpi, setActiveKpi] = useState<KpiCategory | null>("total");
-  
+
   // Route Planner state - persists across tab switches (not F5)
   const [routePlannerState, setRoutePlannerState] = useState<RoutePlannerState>({
     selectedSiteId: "",
@@ -461,7 +460,7 @@ export default function HomePage() {
     siteSearch: "",
     nfoSearch: "",
   });
-  
+
   // ============================================================
   // DATA STATE - Refreshed every 30 seconds from Supabase
   // ============================================================
@@ -470,11 +469,11 @@ export default function HomePage() {
   const [warehouses, setWarehouses] = useState<WarehouseRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  
+
   // Track last successful refresh time
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [refreshError, setRefreshError] = useState<string | null>(null);
-  
+
   // Ref to track if initial load is complete (for showing loading state only on first load)
   const initialLoadComplete = useRef(false);
 
@@ -485,23 +484,23 @@ export default function HomePage() {
     const storedStatus = getStoredValue(LS_KEYS.statusFilter, "all") as StatusFilter;
     const storedArea = getStoredValue(LS_KEYS.areaFilter, "all");
     const storedSearch = getStoredValue(LS_KEYS.searchTerm, "");
-    
+
     setActiveView(storedTab);
     setStatusFilter(storedStatus);
     setAreaFilter(storedArea);
     setSearch(storedSearch);
-    
+
     // Live Map state - read as string, then parse
     const storedMapArea = getStoredValue<string>(LS_KEYS.mapAreaFilter, "NFOs_ONLY");
     const storedMapNfo = getStoredValue<string>(LS_KEYS.mapNfoFilter, "");
-    
+
     // Handle "null" string for "All Sites", otherwise use stored value
     if (storedMapArea === "null") {
       setMapAreaFilter(null);
     } else if (storedMapArea) {
       setMapAreaFilter(storedMapArea);
     }
-    
+
     // Handle "null" string for "all NFOs", otherwise use stored value
     if (storedMapNfo === "null" || storedMapNfo === "") {
       setMapNfoFilter(null);
@@ -573,7 +572,7 @@ export default function HomePage() {
       while (hasMoreRows) {
         const start = pageNumber * PAGE_SIZE;
         const end = start + PAGE_SIZE - 1;
-        
+
         const { data: siteRowsPage, error: siteError } = await supabase
           .from("Site_Coordinates")
           .select("site_id, site_name, latitude, longitude, area")
@@ -587,7 +586,7 @@ export default function HomePage() {
         }
 
         allSiteRows = allSiteRows.concat(siteRowsPage);
-        
+
         if (siteRowsPage.length < PAGE_SIZE) {
           hasMoreRows = false;
         }
@@ -611,7 +610,7 @@ export default function HomePage() {
             area: row.area ?? null,
           };
         }) ?? [];
-      
+
       setSites(siteRecords);
 
       // 1c) Load warehouses
@@ -636,7 +635,7 @@ export default function HomePage() {
           };
         });
         setWarehouses(warehouseRecords);
-        
+
         if (isInitialLoad) {
           console.log("Warehouse rows from Supabase:", warehouseRecords.length, "rows");
         }
@@ -664,7 +663,7 @@ export default function HomePage() {
     } catch (err: any) {
       // Extract error message safely
       const errorMsg = err instanceof Error ? err.message : String(err ?? "Unknown error");
-      
+
       /*
        * ERROR HANDLING STRATEGY:
        * - Initial load: Show full error screen (user needs to know something is wrong)
@@ -880,30 +879,30 @@ export default function HomePage() {
       // 3. No site_id -> NFO->Nearest site
       if (hasValidNfoCoords) {
         let targetSite: SiteRecord | null = null;
-        
+
         // Try to get assigned site first
         if (assignedSiteId) {
           targetSite = getSiteById(sites, assignedSiteId) ?? null;
         }
-        
+
         // Fall back to nearest site if no assigned site
         if (!targetSite && nearest) {
           targetSite = nearest.site as SiteRecord;
         }
-        
+
         if (targetSite && hasValidLocation({ lat: targetSite.latitude, lng: targetSite.longitude })) {
           const nfoPoint = { lat: nfo.lat!, lng: nfo.lng! };
           const sitePoint = { lat: targetSite.latitude!, lng: targetSite.longitude! };
-          
+
           // Check if we should route via warehouse
           const warehouseNameTrimmed = (nfo.warehouse_name ?? "").trim();
           const matchingWarehouse = nfo.via_warehouse && warehouseNameTrimmed
-            ? warehouses.find(w => 
-                namesMatch(w.name, warehouseNameTrimmed) && 
-                hasValidLocation({ lat: w.latitude, lng: w.longitude })
-              )
+            ? warehouses.find(w =>
+              namesMatch(w.name, warehouseNameTrimmed) &&
+              hasValidLocation({ lat: w.latitude, lng: w.longitude })
+            )
             : null;
-          
+
           if (matchingWarehouse) {
             // Route via warehouse: NFO -> Warehouse + Warehouse -> Site
             const whPoint = { lat: matchingWarehouse.latitude!, lng: matchingWarehouse.longitude! };
@@ -1058,6 +1057,7 @@ export default function HomePage() {
             { id: "dashboard", label: "Dashboard" },
             { id: "map", label: "Live map" },
             { id: "routePlanner", label: "Route Planner" },
+            { id: "clusterPlanner", label: "Cluster Planner" },
             // { id: "routes", label: "NFO routes" },  // Hidden from sidebar
             // { id: "settings", label: "Settings" }, // Hidden from sidebar
           ].map((item) => (
@@ -1369,7 +1369,7 @@ export default function HomePage() {
           The filters (mapAreaFilter, mapNfoFilter) are also persisted to localStorage
           so they survive F5 refresh as well.
         */}
-        <div 
+        <div
           className="max-w-6xl mx-auto space-y-4"
           style={{ display: activeView === "map" ? "block" : "none" }}
         >
@@ -1380,8 +1380,8 @@ export default function HomePage() {
             </p>
           </div>
           {/* LiveMap stays mounted - internal state survives tab switches */}
-          <LiveMap 
-            nfos={nfos} 
+          <LiveMap
+            nfos={nfos}
             sites={sites}
             warehouses={warehouses}
             mapAreaFilter={mapAreaFilter}
@@ -1420,6 +1420,18 @@ export default function HomePage() {
           </div>
         )}
 
+        {activeView === "clusterPlanner" && (
+          <div className="max-w-7xl mx-auto space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold">Cluster Planner</h2>
+              <p className="text-xs text-slate-500">
+                Paste site IDs to view cluster ownership on the map.
+              </p>
+            </div>
+            <ClusterPlanner />
+          </div>
+        )}
+
         {activeView === "settings" && (
           <div className="max-w-5xl mx-auto space-y-4">
             <h2 className="text-xl font-semibold">Settings (coming soon)</h2>
@@ -1443,10 +1455,9 @@ type StatCardProps = {
 
 function StatCard({ label, value, accent, isActive, onMouseEnter }: StatCardProps) {
   return (
-    <div 
-      className={`bg-white rounded-xl shadow p-4 flex flex-col gap-1 cursor-pointer transition-all ${
-        isActive ? "ring-2 ring-sky-500 ring-offset-1" : "hover:bg-slate-50"
-      }`}
+    <div
+      className={`bg-white rounded-xl shadow p-4 flex flex-col gap-1 cursor-pointer transition-all ${isActive ? "ring-2 ring-sky-500 ring-offset-1" : "hover:bg-slate-50"
+        }`}
       onMouseEnter={onMouseEnter}
     >
       <span className="text-xs text-gray-500">{label}</span>
