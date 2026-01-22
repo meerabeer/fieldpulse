@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback, useRef } from "react";
+import Link from "next/link";
 import { supabase } from "../lib/supabaseClient";
 import {
   NfoStatusRow,
@@ -1075,6 +1076,13 @@ export default function HomePage() {
               {item.label}
             </button>
           ))}
+          {/* Route Planner (Google) - links to standalone page */}
+          <Link
+            href="/google-map-test"
+            className="block w-full text-left px-3 py-2 rounded-md transition text-slate-300 hover:bg-slate-800 hover:text-white"
+          >
+            Route Planner (Google)
+          </Link>
         </nav>
         <div className="px-4 py-3 border-t border-slate-800 text-xs text-slate-500">
           <div>Data source: Supabase · nfo_status</div>
