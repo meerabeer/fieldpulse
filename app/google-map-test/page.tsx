@@ -69,6 +69,12 @@ export default function GoogleMapTestPage() {
                     >
                         Route Planner (Google)
                     </Link>
+                    <Link
+                        href="/hajj-sites-planner"
+                        className="block w-full text-left px-3 py-2 rounded-md transition text-slate-300 hover:bg-slate-800 hover:text-white"
+                    >
+                        Hajj Sites Planner
+                    </Link>
                 </nav>
                 <div className="px-4 py-3 border-t border-slate-800 text-xs text-slate-500">
                     <div>Data source: Supabase</div>
