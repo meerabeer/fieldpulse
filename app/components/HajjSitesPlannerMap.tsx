@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Polyline, Tooltip, Pane, useMap } from "react-leaflet";
 import L from "leaflet";
 
@@ -16,6 +16,16 @@ type HajjSiteRow = Record<string, string | number | null>;
 
 type HajjSitesPlannerMapProps = {
   sites: HajjSiteRow[];
+  mode?: "default" | "cluster";
+  markerColorBySiteId?: Record<string, string>;
+  markerOpacityBySiteId?: Record<string, number>;
+  onClusterMarkerClick?: (siteId: string) => void;
+  vipQuery?: string;
+  vipFilterActive?: boolean;
+  onVipQueryChange?: (query: string) => void;
+  onVipFilterApply?: () => void;
+  onVipFilterClear?: () => void;
+  vipMatchCount?: number;
 };
 
 type MapPoint = {
@@ -25,6 +35,7 @@ type MapPoint = {
   row: HajjSiteRow;
   areaKey: string | null;
   areaLabel: string;
+  vipHighlighted: boolean;
 };
 
 type FeConnection = {
@@ -163,7 +174,67 @@ function getAreaColor(areaValue: unknown): string {
   return AREA_COLOR_PALETTE[index];
 }
 
-function createColoredPinIcon(color: string): L.DivIcon {
+const VIP_HIGHLIGHT_KEYWORDS = [
+  "critical hub",
+  "hajj ministry",
+  "military",
+  "long ladder",
+  "train",
+  "laal",
+  "palace",
+  "jamarat",
+  "crane",
+  "kidana",
+  "hospital",
+  "towers",
+  "ministry",
+  "health",
+  "jabl alrahmah",
+];
+
+function normalizeText(input: string): string {
+  return input
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .replace(/[^a-zA-Z0-9]+/g, " ")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+const VIP_HIGHLIGHT_KEYWORDS_NORMALIZED = VIP_HIGHLIGHT_KEYWORDS.map(normalizeText);
+const VIP_HIGHLIGHT_KEYWORDS_COMPACT = VIP_HIGHLIGHT_KEYWORDS_NORMALIZED.map((keyword) =>
+  keyword.replace(/\s+/g, "")
+);
+
+function isVipHighlighted(vipCategory?: string | number | null): boolean {
+  if (!vipCategory) return false;
+  const normalized = normalizeText(String(vipCategory));
+  if (!normalized) return false;
+  const compact = normalized.replace(/\s+/g, "");
+  return VIP_HIGHLIGHT_KEYWORDS_NORMALIZED.some((keyword, index) => {
+    if (!keyword) return false;
+    if (normalized.includes(keyword)) return true;
+    const compactKeyword = VIP_HIGHLIGHT_KEYWORDS_COMPACT[index];
+    return compactKeyword ? compact.includes(compactKeyword) : false;
+  });
+}
+
+function matchesVipQuery(vipCategory: string | number | null | undefined, query: string): boolean {
+  if (!query.trim()) return false;
+  if (!vipCategory) return false;
+
+  const normalizedCategory = normalizeText(String(vipCategory));
+  if (!normalizedCategory) return false;
+
+  const queryWords = normalizeText(query).split(/\s+/).filter(Boolean);
+  if (queryWords.length === 0) return false;
+
+  // All query words must be present (AND logic)
+  return queryWords.every((word) => normalizedCategory.includes(word));
+}
+
+function createColoredPinIcon(color: string, highlighted = false): L.DivIcon {
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="28" height="42">
       <defs>
@@ -179,7 +250,7 @@ function createColoredPinIcon(color: string): L.DivIcon {
 
   return L.divIcon({
     html: svg,
-    className: "hajj-site-pin",
+    className: highlighted ? "hajj-site-pin vip-highlight" : "hajj-site-pin",
     iconSize: [28, 42],
     iconAnchor: [14, 42],
     popupAnchor: [0, -36],
@@ -204,7 +275,56 @@ function MapAutoFit({ points }: { points: MapPoint[] }) {
   return null;
 }
 
-export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps) {
+export default function HajjSitesPlannerMap({
+  sites,
+  mode = "default",
+  markerColorBySiteId,
+  markerOpacityBySiteId,
+  onClusterMarkerClick,
+  vipQuery: externalVipQuery,
+  vipFilterActive: externalVipFilterActive,
+  onVipQueryChange,
+  onVipFilterApply,
+  onVipFilterClear,
+  vipMatchCount: externalVipMatchCount,
+}: HajjSitesPlannerMapProps) {
+  const isClusterMode = mode === "cluster";
+
+  // Internal VIP state (used when external props not provided)
+  const [internalVipQuery, setInternalVipQuery] = useState("");
+  const [internalVipFilterActive, setInternalVipFilterActive] = useState(false);
+
+  // Use external or internal state
+  const vipQuery = externalVipQuery ?? internalVipQuery;
+  const vipFilterActive = externalVipFilterActive ?? internalVipFilterActive;
+
+  const handleVipQueryChange = useCallback(
+    (query: string) => {
+      if (onVipQueryChange) {
+        onVipQueryChange(query);
+      } else {
+        setInternalVipQuery(query);
+      }
+    },
+    [onVipQueryChange]
+  );
+
+  const handleVipFilterApply = useCallback(() => {
+    if (onVipFilterApply) {
+      onVipFilterApply();
+    } else {
+      setInternalVipFilterActive(true);
+    }
+  }, [onVipFilterApply]);
+
+  const handleVipFilterClear = useCallback(() => {
+    if (onVipFilterClear) {
+      onVipFilterClear();
+    } else {
+      setInternalVipFilterActive(false);
+    }
+  }, [onVipFilterClear]);
+
   const [selectedArea, setSelectedArea] = useState<string | null>(null);
   const [selectedConnection, setSelectedConnection] = useState<{
     from: MapPoint;
@@ -213,6 +333,10 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
   } | null>(null);
   const [feConnectionMode, setFeConnectionMode] = useState<FeConnectionMode>("ON_CLICK");
   const [selectedHubFeId, setSelectedHubFeId] = useState<string | null>(null);
+
+  // Track when VIP filter is first applied to trigger fit bounds
+  const [shouldFitVipBounds, setShouldFitVipBounds] = useState(false);
+  const prevVipFilterActiveRef = useRef(vipFilterActive);
 
   const points = useMemo(() => {
     return sites
@@ -227,26 +351,29 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
           : `row-${index}`;
         const areaKey = getAreaKey(row["Area"]);
         const areaLabel = getAreaLabel(areaKey);
+        const vipHighlighted = isVipHighlighted(row["VIP_Category"]);
 
-        return { key, lat, lng, row, areaKey, areaLabel } as MapPoint;
+        return { key, lat, lng, row, areaKey, areaLabel, vipHighlighted } as MapPoint;
       })
       .filter((point): point is MapPoint => point != null);
   }, [sites]);
 
   const areaFilteredPoints = useMemo(() => {
-    if (!selectedArea) return points;
+    if (isClusterMode || !selectedArea) return points;
     return points.filter((point) => point.areaLabel === selectedArea);
-  }, [points, selectedArea]);
+  }, [points, selectedArea, isClusterMode]);
 
   const legendAreas = useMemo(() => {
+    if (isClusterMode) return [];
     const unique = new Set<string>();
     for (const point of points) {
       unique.add(point.areaLabel);
     }
     return Array.from(unique).sort((a, b) => a.localeCompare(b));
-  }, [points]);
+  }, [points, isClusterMode]);
 
   const filteredPoints = useMemo(() => {
+    if (isClusterMode) return points;
     if (!selectedHubFeId) return areaFilteredPoints;
 
     const normalizedHub = normalizeSiteId(selectedHubFeId);
@@ -263,7 +390,43 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
     }
 
     return hubSites;
-  }, [areaFilteredPoints, points, selectedHubFeId]);
+  }, [areaFilteredPoints, points, selectedHubFeId, isClusterMode]);
+
+  // Precompute VIP matches for current query (before filter is applied)
+  const vipMatchedSiteKeys = useMemo(() => {
+    if (!vipQuery.trim()) return new Set<string>();
+    const matched = new Set<string>();
+    for (const point of points) {
+      if (matchesVipQuery(point.row["VIP_Category"], vipQuery)) {
+        matched.add(point.key);
+      }
+    }
+    return matched;
+  }, [vipQuery, points]);
+
+  const vipMatchCount = externalVipMatchCount ?? vipMatchedSiteKeys.size;
+
+  // Apply VIP filter on top of existing filters
+  const vipFilteredPoints = useMemo(() => {
+    if (!vipFilterActive) return filteredPoints;
+    return filteredPoints.filter((point) => vipMatchedSiteKeys.has(point.key));
+  }, [filteredPoints, vipFilterActive, vipMatchedSiteKeys]);
+
+  // Track VIP filter activation for fit bounds
+  useEffect(() => {
+    if (vipFilterActive && !prevVipFilterActiveRef.current) {
+      setShouldFitVipBounds(true);
+    }
+    prevVipFilterActiveRef.current = vipFilterActive;
+  }, [vipFilterActive]);
+
+  // Reset fit bounds flag after it's been consumed
+  useEffect(() => {
+    if (shouldFitVipBounds) {
+      const timer = setTimeout(() => setShouldFitVipBounds(false), 100);
+      return () => clearTimeout(timer);
+    }
+  }, [shouldFitVipBounds]);
 
   const siteLookup = useMemo(() => {
     const lookup = new Map<string, MapPoint>();
@@ -313,6 +476,9 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
   }, [points, siteLookup]);
 
   const handleMarkerClick = useCallback((point: MapPoint) => {
+    if (isClusterMode) {
+      return;
+    }
     const siteId = point.row["Site ID"];
     const feId = point.row["FE ID"];
     const variants = getIdVariants(feId);
@@ -361,24 +527,26 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
     }
 
     setSelectedConnection(null);
-  }, [siteLookup]);
+  }, [isClusterMode, siteLookup]);
 
   const visibleConnection = useMemo(() => {
+    if (isClusterMode) return null;
     if (!selectedConnection) return null;
-    const fromVisible = filteredPoints.some((point) => point.key === selectedConnection.from.key);
+    const fromVisible = vipFilteredPoints.some((point) => point.key === selectedConnection.from.key);
     if (!fromVisible) return null;
     return selectedConnection;
-  }, [filteredPoints, selectedConnection]);
+  }, [vipFilteredPoints, selectedConnection, isClusterMode]);
 
   const visibleFeConnections = useMemo(() => {
+    if (isClusterMode) return [];
     if (feConnectionMode !== "SHOW_ALL") return [];
-    const visibleFromKeys = new Set(filteredPoints.map((point) => point.key));
+    const visibleFromKeys = new Set(vipFilteredPoints.map((point) => point.key));
     return allFeConnections.filter((connection) => {
       if (!visibleFromKeys.has(connection.from.key)) return false;
       if (!selectedHubFeId) return true;
       return connection.feIdNormalized === normalizeSiteId(selectedHubFeId);
     });
-  }, [allFeConnections, feConnectionMode, filteredPoints, selectedHubFeId]);
+  }, [allFeConnections, feConnectionMode, vipFilteredPoints, selectedHubFeId, isClusterMode]);
 
   const hubCounts = useMemo(() => {
     // Hub FE counts are computed dynamically from the current dataset.
@@ -419,17 +587,16 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
     };
   }, []);
 
+  const iconCache = useMemo(() => new Map<string, L.DivIcon>(), []);
 
-  const iconCache = useMemo(() => {
-    const cache = new Map<string, L.DivIcon>();
-    for (const area of legendAreas) {
-      const areaKey = area === EMPTY_AREA_LABEL ? null : area;
-      const color = getAreaColor(areaKey);
-      cache.set(area, createColoredPinIcon(color));
-    }
-    cache.set(EMPTY_AREA_LABEL, createColoredPinIcon(DEFAULT_AREA_COLOR));
-    return cache;
-  }, [legendAreas]);
+  const getIconForColor = useCallback((color: string, highlighted: boolean) => {
+    const cacheKey = `${color}:${highlighted ? "vip" : "default"}`;
+    const cached = iconCache.get(cacheKey);
+    if (cached) return cached;
+    const icon = createColoredPinIcon(color, highlighted);
+    iconCache.set(cacheKey, icon);
+    return icon;
+  }, [iconCache]);
 
   const defaultCenter: [number, number] = [24.7136, 46.6753];
   const defaultZoom = 6;
@@ -440,6 +607,33 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
         .hajj-site-pin {
           background: transparent !important;
           border: none !important;
+          position: relative;
+          overflow: visible !important;
+        }
+        .hajj-site-pin svg {
+          position: relative;
+          z-index: 1;
+          display: block;
+        }
+        .hajj-site-pin.vip-highlight::before {
+          content: "";
+          position: absolute;
+          inset: -6px;
+          border-radius: 999px;
+          box-shadow: 0 0 12px 6px rgba(255, 215, 0, 0.85);
+          opacity: 0.9;
+          animation: vip-pulse 2s ease-in-out infinite;
+          z-index: 0;
+        }
+        @keyframes vip-pulse {
+          0%, 100% {
+            transform: scale(0.9);
+            opacity: 0.6;
+          }
+          50% {
+            transform: scale(1.15);
+            opacity: 1;
+          }
         }
         .hajj-site-label {
           font-size: 10px;
@@ -465,7 +659,7 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
 
-            {filteredPoints.length > 0 && <MapAutoFit points={filteredPoints} />}
+            {vipFilteredPoints.length > 0 && <MapAutoFit points={vipFilteredPoints} key={shouldFitVipBounds ? 'vip-fit' : 'normal'} />}
 
             {feConnectionMode === "ON_CLICK" && visibleConnection && (
               <Pane name="fe-connections" style={{ zIndex: 2000 }}>
@@ -496,19 +690,38 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
               </Pane>
             )}
 
-            {filteredPoints.map((point) => {
+            {vipFilteredPoints.map((point) => {
+              const siteIdRaw = point.row["Site ID"] ? String(point.row["Site ID"]).trim() : "";
+              const normalizedSiteId = normalizeSiteId(siteIdRaw);
+              const overrideColor =
+                (siteIdRaw && markerColorBySiteId?.[siteIdRaw]) ||
+                (normalizedSiteId && markerColorBySiteId?.[normalizedSiteId]) ||
+                undefined;
+              const overrideOpacity =
+                (siteIdRaw && markerOpacityBySiteId?.[siteIdRaw]) ||
+                (normalizedSiteId && markerOpacityBySiteId?.[normalizedSiteId]) ||
+                undefined;
+              const markerOpacity = typeof overrideOpacity === 'number' ? overrideOpacity : 1;
               const areaColor = getAreaColor(point.areaKey);
-              const siteId = point.row["Site ID"] ? String(point.row["Site ID"]) : "";
-              const areaLabel = point.areaLabel;
-              const icon = iconCache.get(areaLabel) ?? createColoredPinIcon(areaColor);
+              const markerColor = overrideColor ?? areaColor;
+              const icon = getIconForColor(markerColor, point.vipHighlighted);
 
               return (
                 <Marker
                   key={point.key}
                   position={[point.lat, point.lng]}
                   icon={icon}
+                  opacity={markerOpacity}
                   eventHandlers={{
-                    click: () => handleMarkerClick(point),
+                    click: () => {
+                      if (isClusterMode) {
+                        if (siteIdRaw && onClusterMarkerClick) {
+                          onClusterMarkerClick(siteIdRaw);
+                        }
+                        return;
+                      }
+                      handleMarkerClick(point);
+                    },
                   }}
                 >
                   <Tooltip
@@ -518,7 +731,7 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
                     opacity={0.9}
                     className="hajj-site-label"
                   >
-                    {siteId || "-"}
+                    {siteIdRaw || "-"}
                   </Tooltip>
                   <Popup>
                     <div className="text-sm space-y-1 min-w-[220px]">
@@ -551,125 +764,239 @@ export default function HajjSitesPlannerMap({ sites }: HajjSitesPlannerMapProps)
           </MapContainer>
         </div>
 
-        <div className="border-t border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                type="button"
-                onClick={() => setSelectedArea(null)}
-                className={`px-2 py-1 rounded-md border transition ${
-                  selectedArea === null
-                    ? "bg-slate-800 text-white border-slate-800"
-                    : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                }`}
-              >
-                All
-              </button>
-              {legendAreas.map((area) => {
-                const color = getAreaColor(area === EMPTY_AREA_LABEL ? null : area);
-                const isActive = selectedArea === area;
-                return (
-                  <button
-                    key={area}
-                    type="button"
-                    onClick={() => setSelectedArea((prev) => (prev === area ? null : area))}
-                    className={`flex items-center gap-2 px-2 py-1 rounded-md border transition ${
-                      isActive
-                        ? "bg-slate-800 text-white border-slate-800"
-                        : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                    }`}
-                  >
-                    <span
-                      className="inline-block h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: color }}
-                    />
-                    <span className="whitespace-nowrap">{area}</span>
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex items-center gap-4 text-[11px] text-slate-500">
-              <div className="flex items-center gap-2 text-xs text-slate-600">
+        {!isClusterMode && (
+          <div className="border-t border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
                 <button
                   type="button"
-                  onClick={() => setFeConnectionMode("OFF")}
+                  onClick={() => setSelectedArea(null)}
                   className={`px-2 py-1 rounded-md border transition ${
-                    feConnectionMode === "OFF"
+                    selectedArea === null
                       ? "bg-slate-800 text-white border-slate-800"
                       : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
                   }`}
                 >
-                  Off
+                  All
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setFeConnectionMode("ON_CLICK")}
-                  className={`px-2 py-1 rounded-md border transition ${
-                    feConnectionMode === "ON_CLICK"
-                      ? "bg-slate-800 text-white border-slate-800"
-                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                  }`}
-                >
-                  On Click
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setFeConnectionMode("SHOW_ALL")}
-                  className={`px-2 py-1 rounded-md border transition ${
-                    feConnectionMode === "SHOW_ALL"
-                      ? "bg-slate-800 text-white border-slate-800"
-                      : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                  }`}
-                >
-                  Show All
-                </button>
-              </div>
-              <div className="flex items-center gap-2 text-xs text-slate-600">
-                <span className="font-medium text-slate-500">
-                  Hub FE Lines ({totalHubDependents})
-                </span>
-                <div className="flex items-center gap-2 flex-wrap max-h-16 overflow-y-auto">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedHubFeId(null)}
-                    className={`flex items-center gap-1 rounded-md border px-2 py-1 transition ${
-                      selectedHubFeId === null
-                        ? "bg-slate-800 text-white border-slate-800"
-                        : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-                    }`}
-                  >
-                    All Hubs
-                  </button>
-                  {hubLegendItems.map((item) => (
+                {legendAreas.map((area) => {
+                  const color = getAreaColor(area === EMPTY_AREA_LABEL ? null : area);
+                  const isActive = selectedArea === area;
+                  return (
                     <button
-                      key={item.id}
+                      key={area}
                       type="button"
-                      onClick={() =>
-                        setSelectedHubFeId((prev) => (prev === item.id ? null : item.id))
-                      }
-                      className={`flex items-center gap-1 rounded-md border px-2 py-1 transition ${
-                        selectedHubFeId === item.id
+                      onClick={() => setSelectedArea((prev) => (prev === area ? null : area))}
+                      className={`flex items-center gap-2 px-2 py-1 rounded-md border transition ${
+                        isActive
                           ? "bg-slate-800 text-white border-slate-800"
                           : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
                       }`}
                     >
                       <span
                         className="inline-block h-2.5 w-2.5 rounded-full"
-                        style={{ backgroundColor: item.color }}
+                        style={{ backgroundColor: color }}
                       />
-                      <span className="text-[11px] text-slate-600">
-                        {item.id} ({item.count})
-                      </span>
+                      <span className="whitespace-nowrap">{area}</span>
                     </button>
-                  ))}
-                </div>
+                  );
+                })}
               </div>
-              <span>
-                Showing {filteredPoints.length} of {points.length} sites
+            </div>
+
+            {/* VIP Search Row */}
+            <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center gap-2 flex-1 max-w-md">
+                <input
+                  type="text"
+                  value={vipQuery}
+                  onChange={(e) => handleVipQueryChange(e.target.value)}
+                  placeholder="Search VIP_Category… (e.g., hospital, critical, train)"
+                  className="flex-1 px-2 py-1 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <span className="text-xs text-slate-500 whitespace-nowrap">
+                  Matched:{" "}
+                  {vipQuery.trim() && vipMatchCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={handleVipFilterApply}
+                      className="font-semibold text-blue-600 hover:underline"
+                    >
+                      {vipMatchCount}
+                    </button>
+                  ) : (
+                    <span>{vipMatchCount}</span>
+                  )}
+                </span>
+                {vipQuery.trim() && vipMatchCount > 0 && !vipFilterActive && (
+                  <button
+                    type="button"
+                    onClick={handleVipFilterApply}
+                    className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition"
+                  >
+                    Apply
+                  </button>
+                )}
+                {vipFilterActive && (
+                  <button
+                    type="button"
+                    onClick={handleVipFilterClear}
+                    className="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium hover:bg-red-200 transition flex items-center gap-1"
+                  >
+                    <span>✕</span>
+                    <span>Clear VIP filter</span>
+                  </button>
+                )}
+              </div>
+              {vipFilterActive && (
+                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+                  VIP filter: "{vipQuery}" ({vipFilteredPoints.length} sites)
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-slate-100 flex-wrap">
+              <div className="flex items-center gap-4 text-[11px] text-slate-500">
+                <div className="flex items-center gap-2 text-xs text-slate-600">
+                  <button
+                    type="button"
+                    onClick={() => setFeConnectionMode("OFF")}
+                    className={`px-2 py-1 rounded-md border transition ${
+                      feConnectionMode === "OFF"
+                        ? "bg-slate-800 text-white border-slate-800"
+                        : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                    }`}
+                  >
+                    Off
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFeConnectionMode("ON_CLICK")}
+                    className={`px-2 py-1 rounded-md border transition ${
+                      feConnectionMode === "ON_CLICK"
+                        ? "bg-slate-800 text-white border-slate-800"
+                        : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                    }`}
+                  >
+                    On Click
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFeConnectionMode("SHOW_ALL")}
+                    className={`px-2 py-1 rounded-md border transition ${
+                      feConnectionMode === "SHOW_ALL"
+                        ? "bg-slate-800 text-white border-slate-800"
+                        : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                    }`}
+                  >
+                    Show All
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-slate-600">
+                  <span className="font-medium text-slate-500">
+                    Hub FE Lines ({totalHubDependents})
+                  </span>
+                  <div className="flex items-center gap-2 flex-wrap max-h-16 overflow-y-auto">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedHubFeId(null)}
+                      className={`flex items-center gap-1 rounded-md border px-2 py-1 transition ${
+                        selectedHubFeId === null
+                          ? "bg-slate-800 text-white border-slate-800"
+                          : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                      }`}
+                    >
+                      All Hubs
+                    </button>
+                    {hubLegendItems.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() =>
+                          setSelectedHubFeId((prev) => (prev === item.id ? null : item.id))
+                        }
+                        className={`flex items-center gap-1 rounded-md border px-2 py-1 transition ${
+                          selectedHubFeId === item.id
+                            ? "bg-slate-800 text-white border-slate-800"
+                            : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+                        }`}
+                      >
+                        <span
+                          className="inline-block h-2.5 w-2.5 rounded-full"
+                          style={{ backgroundColor: item.color }}
+                        />
+                        <span className="text-[11px] text-slate-600">
+                          {item.id} ({item.count})
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <span>
+                  Showing {vipFilteredPoints.length} of {points.length} sites
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Cluster Mode VIP Controls */}
+        {isClusterMode && (
+          <div className="border-t border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-2 flex-1 max-w-md">
+                <input
+                  type="text"
+                  value={vipQuery}
+                  onChange={(e) => handleVipQueryChange(e.target.value)}
+                  placeholder="Search VIP_Category… (e.g., hospital, critical, train)"
+                  className="flex-1 px-2 py-1 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <span className="text-xs text-slate-500 whitespace-nowrap">
+                  Matched:{" "}
+                  {vipQuery.trim() && vipMatchCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={handleVipFilterApply}
+                      className="font-semibold text-blue-600 hover:underline"
+                    >
+                      {vipMatchCount}
+                    </button>
+                  ) : (
+                    <span>{vipMatchCount}</span>
+                  )}
+                </span>
+                {vipQuery.trim() && vipMatchCount > 0 && !vipFilterActive && (
+                  <button
+                    type="button"
+                    onClick={handleVipFilterApply}
+                    className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition"
+                  >
+                    Apply
+                  </button>
+                )}
+                {vipFilterActive && (
+                  <button
+                    type="button"
+                    onClick={handleVipFilterClear}
+                    className="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium hover:bg-red-200 transition flex items-center gap-1"
+                  >
+                    <span>✕</span>
+                    <span>Clear VIP filter</span>
+                  </button>
+                )}
+              </div>
+              {vipFilterActive && (
+                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+                  VIP filter: "{vipQuery}" ({vipFilteredPoints.length} sites)
+                </span>
+              )}
+              <span className="text-xs text-slate-500 ml-auto">
+                Showing {vipFilteredPoints.length} of {points.length} sites
               </span>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
