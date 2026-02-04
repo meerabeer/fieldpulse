@@ -152,7 +152,7 @@ export async function POST(request: NextRequest) {
       const batch = normalizedRows.slice(i, i + BATCH_SIZE);
       const { error: insertError } = await supabase
         .from(TABLE_NAME)
-        .insert(batch, { returning: "minimal" });
+        .insert(batch);
 
       if (insertError) {
         return NextResponse.json(
