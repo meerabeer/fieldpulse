@@ -19,6 +19,7 @@ const REQUIRED_COLUMNS = [
   "ON/OFF_Season-26",
   "VIP_Category",
   "Site_Type_Category",
+  "Location_Category",
   "Project_Scope_2026",
   "Survey_Priority",
   "Access_Status",
@@ -194,6 +195,28 @@ function tokenizeSiteIds(input: string): string[] {
     .split(/[\s,;]+/)
     .map((token) => token.trim())
     .filter(Boolean);
+}
+
+// Location categories that should be highlighted (VIP sites - yellow glow)
+const HIGHLIGHT_LOCATION_CATEGORIES = new Set([
+  "jamarat",
+  "train station",
+  "long ladder",
+  "critical-hub",
+  "palace",
+  "mina tower",
+  "kidana building",
+  "hospital",
+  "ministry",
+  "crane",
+  "military camp",
+  "laal company",
+]);
+
+function isHighlightedLocationCategory(value?: string | number | null): boolean {
+  if (value == null) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return HIGHLIGHT_LOCATION_CATEGORIES.has(normalized);
 }
 
 function getClusterColor(index: number): string {
@@ -503,7 +526,7 @@ function escapeCsvField(value: string): string {
   return value;
 }
 
-function buildClusterCsv(rows: ClusteredSite[]): string {
+function buildClusterCsv(rows: ClusteredSite[], hasVipGroup: boolean): string {
   const headers = [
     "Site ID",
     "NFO Name",
@@ -514,14 +537,19 @@ function buildClusterCsv(rows: ClusteredSite[]): string {
     "Location",
     "Area",
     "ON/OFF_Season-26",
+    "Location_Category",
     "VIP_Category",
     "Site_Type_Category",
   ];
   const lines = rows.map(({ point, clusterIndex }) => {
     const groupNumber = clusterIndex + 1;
+    // If there's a VIP group, group 0 is "VIP NFO", others are "NFO 2", "NFO 3", etc.
+    const nfoName = hasVipGroup && clusterIndex === 0 
+      ? "VIP NFO" 
+      : `NFO ${groupNumber}`;
     const row: Record<string, string> = {
       "Site ID": point.siteId || "",
-      "NFO Name": `NFO ${groupNumber}`,
+      "NFO Name": nfoName,
       "FE ID": point.row["FE ID"] ? String(point.row["FE ID"]) : "",
       "Technology": point.row["Technology"] ? String(point.row["Technology"]) : "",
       "Latitude": Number.isFinite(point.lat) ? String(point.lat) : "",
@@ -531,6 +559,7 @@ function buildClusterCsv(rows: ClusteredSite[]): string {
       "ON/OFF_Season-26": point.row["ON/OFF_Season-26"]
         ? String(point.row["ON/OFF_Season-26"])
         : "",
+      "Location_Category": point.row["Location_Category"] ? String(point.row["Location_Category"]) : "",
       "VIP_Category": point.row["VIP_Category"] ? String(point.row["VIP_Category"]) : "",
       "Site_Type_Category": point.row["Site_Type_Category"]
         ? String(point.row["Site_Type_Category"])
@@ -570,6 +599,7 @@ export default function HajjSitesPlanner() {
   const [clusterStats, setClusterStats] = useState<ClusterStats | null>(null);
   const [clusterError, setClusterError] = useState<string | null>(null);
   const [clusterKUsed, setClusterKUsed] = useState<number | null>(null);
+  const [hasVipGroup, setHasVipGroup] = useState(false);
   const clusterDebugRef = useRef<ClusterDebugState | null>(null);
 
   const appendStatus = useCallback((line: string) => {
@@ -839,6 +869,7 @@ export default function HajjSitesPlanner() {
     setClusterKUsed(null);
     setSelectedClusterIndex(null);
     setShowOnlySelectedCluster(false);
+    setHasVipGroup(false);
 
     const tokens = tokenizeSiteIds(clusterInput);
     if (tokens.length === 0) {
@@ -913,13 +944,98 @@ export default function HajjSitesPlanner() {
       return;
     }
 
-    const resolvedResult = runBalancedClustering(matched, usedK, 2);
-    const clustered = matched.map((point, index) => ({
-      point,
-      clusterIndex: resolvedResult.assignments[index] ?? 0,
-    }));
+    // Separate VIP (highlighted) sites from normal sites
+    const vipSites: ClusterPoint[] = [];
+    const normalSites: ClusterPoint[] = [];
+    
+    for (const point of matched) {
+      if (isHighlightedLocationCategory(point.row["Location_Category"])) {
+        vipSites.push(point);
+      } else {
+        normalSites.push(point);
+      }
+    }
+
+    let clustered: ClusteredSite[];
+    let finalCentroids: { lat: number; lng: number }[];
+    let finalAssignments: number[];
+
+    if (vipSites.length > 0 && usedK > 1) {
+      // VIP sites exist - dedicate NFO 1 (index 0) to VIP sites
+      // Cluster normal sites with K-1 groups, then offset their indices by 1
+      setHasVipGroup(true);
+      const normalK = usedK - 1;
+      
+      if (normalSites.length === 0) {
+        // All sites are VIP - assign all to group 0
+        clustered = vipSites.map((point) => ({
+          point,
+          clusterIndex: 0,
+        }));
+        const vipCentroid = {
+          lat: vipSites.reduce((sum, p) => sum + p.lat, 0) / vipSites.length,
+          lng: vipSites.reduce((sum, p) => sum + p.lng, 0) / vipSites.length,
+        };
+        finalCentroids = [vipCentroid];
+        finalAssignments = vipSites.map(() => 0);
+      } else if (normalK === 0) {
+        // Only 1 NFO requested but have both VIP and normal - put all in group 0
+        clustered = matched.map((point) => ({
+          point,
+          clusterIndex: 0,
+        }));
+        const centroid = {
+          lat: matched.reduce((sum, p) => sum + p.lat, 0) / matched.length,
+          lng: matched.reduce((sum, p) => sum + p.lng, 0) / matched.length,
+        };
+        finalCentroids = [centroid];
+        finalAssignments = matched.map(() => 0);
+      } else {
+        // Cluster normal sites with K-1 groups
+        const normalResult = runBalancedClustering(normalSites, normalK, 2);
+        
+        // Build clustered array: VIP sites get index 0, normal sites get offset indices (1, 2, 3...)
+        const vipClustered = vipSites.map((point) => ({
+          point,
+          clusterIndex: 0, // VIP NFO is always group 0
+        }));
+        
+        const normalClustered = normalSites.map((point, index) => ({
+          point,
+          clusterIndex: (normalResult.assignments[index] ?? 0) + 1, // Offset by 1
+        }));
+        
+        clustered = [...vipClustered, ...normalClustered];
+        
+        // Compute VIP centroid
+        const vipCentroid = {
+          lat: vipSites.reduce((sum, p) => sum + p.lat, 0) / vipSites.length,
+          lng: vipSites.reduce((sum, p) => sum + p.lng, 0) / vipSites.length,
+        };
+        
+        // Combine centroids: VIP centroid first, then normal centroids
+        finalCentroids = [vipCentroid, ...normalResult.centroids];
+        
+        // Build assignments array in original matched order
+        const vipAssignments = vipSites.map(() => 0);
+        const normalAssignments = normalResult.assignments.map((a) => a + 1);
+        finalAssignments = [...vipAssignments, ...normalAssignments];
+      }
+    } else {
+      // No VIP sites or only 1 NFO - use normal balanced clustering
+      const resolvedResult = runBalancedClustering(matched, usedK, 2);
+      clustered = matched.map((point, index) => ({
+        point,
+        clusterIndex: resolvedResult.assignments[index] ?? 0,
+      }));
+      finalCentroids = resolvedResult.centroids;
+      finalAssignments = resolvedResult.assignments;
+    }
+
     const indexBySiteId = new Map<string, number>();
-    matched.forEach((point, index) => {
+    // For debug, we need to map back to the combined points array
+    const allPoints = vipSites.length > 0 && usedK > 1 ? [...vipSites, ...normalSites] : matched;
+    allPoints.forEach((point, index) => {
       indexBySiteId.set(point.siteId, index);
       const normalized = normalizeSiteId(point.siteId);
       if (normalized) {
@@ -927,12 +1043,12 @@ export default function HajjSitesPlanner() {
       }
     });
     clusterDebugRef.current = {
-      points: matched,
-      centroids: resolvedResult.centroids,
-      assignments: resolvedResult.assignments,
+      points: allPoints,
+      centroids: finalCentroids,
+      assignments: finalAssignments,
       indexBySiteId,
     };
-    logClusterDiagnostics(matched, resolvedResult.assignments, resolvedResult.centroids);
+    logClusterDiagnostics(allPoints, finalAssignments, finalCentroids);
     setClusteredSites(clustered);
   }, [clusterInput, clusterK, siteIndex, sites.length]);
 
@@ -944,6 +1060,7 @@ export default function HajjSitesPlanner() {
     setClusterStats(null);
     setClusterError(null);
     setClusterKUsed(null);
+    setHasVipGroup(false);
     clusterDebugRef.current = null;
   }, []);
 
@@ -955,10 +1072,10 @@ export default function HajjSitesPlanner() {
       }
       return a.point.siteId.localeCompare(b.point.siteId);
     });
-    const csvContent = buildClusterCsv(sorted);
+    const csvContent = buildClusterCsv(sorted, hasVipGroup);
     const suffix = clusterKUsed ? `_K${clusterKUsed}` : "";
     downloadCsv(csvContent, `hajj_sites_planner_clusters${suffix}.csv`);
-  }, [clusterKUsed, clusteredSites]);
+  }, [clusterKUsed, clusteredSites, hasVipGroup]);
 
   return (
     <div className="space-y-6">
@@ -1177,7 +1294,9 @@ export default function HajjSitesPlanner() {
                           style={{ backgroundColor: item.color }}
                         />
                         <span>
-                          NFO {item.index + 1} ({item.count})
+                          {hasVipGroup && item.index === 0 
+                            ? `VIP NFO (${item.count})` 
+                            : `NFO ${item.index + 1} (${item.count})`}
                         </span>
                       </button>
                     );

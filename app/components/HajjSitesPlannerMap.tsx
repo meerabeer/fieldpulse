@@ -20,12 +20,12 @@ type HajjSitesPlannerMapProps = {
   markerColorBySiteId?: Record<string, string>;
   markerOpacityBySiteId?: Record<string, number>;
   onClusterMarkerClick?: (siteId: string) => void;
-  vipQuery?: string;
-  vipFilterActive?: boolean;
-  onVipQueryChange?: (query: string) => void;
-  onVipFilterApply?: () => void;
-  onVipFilterClear?: () => void;
-  vipMatchCount?: number;
+  locationQuery?: string;
+  locationFilterActive?: boolean;
+  onLocationQueryChange?: (query: string) => void;
+  onLocationFilterApply?: () => void;
+  onLocationFilterClear?: () => void;
+  locationMatchCount?: number;
 };
 
 type MapPoint = {
@@ -35,7 +35,7 @@ type MapPoint = {
   row: HajjSiteRow;
   areaKey: string | null;
   areaLabel: string;
-  vipHighlighted: boolean;
+  locationHighlighted: boolean;
 };
 
 type FeConnection = {
@@ -174,64 +174,54 @@ function getAreaColor(areaValue: unknown): string {
   return AREA_COLOR_PALETTE[index];
 }
 
-const VIP_HIGHLIGHT_KEYWORDS = [
-  "critical hub",
-  "hajj ministry",
-  "military",
-  "long ladder",
-  "train",
-  "laal",
-  "palace",
+// Location categories that should be highlighted (yellow glow)
+const HIGHLIGHT_LOCATION_CATEGORIES = new Set([
   "jamarat",
-  "crane",
-  "kidana",
+  "train station",
+  "long ladder",
+  "critical-hub",
+  "palace",
+  "mina tower",
+  "kidana building",
   "hospital",
-  "towers",
   "ministry",
-  "health",
-  "jabl alrahmah",
+  "crane",
+  "military camp",
+  "laal company",
+]);
+
+// Quick filter chips for Location_Category
+const LOCATION_CATEGORY_CHIPS = [
+  "Jamarat",
+  "Train Station",
+  "Long Ladder",
+  "Critical-HUB",
+  "Palace",
+  "Mina Tower",
+  "Kidana Building",
+  "Hospital",
+  "Ministry",
+  "Crane",
+  "Military camp",
+  "Laal Company",
 ];
 
-function normalizeText(input: string): string {
-  return input
-    .replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .replace(/[^a-zA-Z0-9]+/g, " ")
-    .toLowerCase()
-    .trim()
-    .replace(/\s+/g, " ");
+function isHighlightedLocationCategory(value?: string | number | null): boolean {
+  if (value == null) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return HIGHLIGHT_LOCATION_CATEGORIES.has(normalized);
 }
 
-const VIP_HIGHLIGHT_KEYWORDS_NORMALIZED = VIP_HIGHLIGHT_KEYWORDS.map(normalizeText);
-const VIP_HIGHLIGHT_KEYWORDS_COMPACT = VIP_HIGHLIGHT_KEYWORDS_NORMALIZED.map((keyword) =>
-  keyword.replace(/\s+/g, "")
-);
-
-function isVipHighlighted(vipCategory?: string | number | null): boolean {
-  if (!vipCategory) return false;
-  const normalized = normalizeText(String(vipCategory));
-  if (!normalized) return false;
-  const compact = normalized.replace(/\s+/g, "");
-  return VIP_HIGHLIGHT_KEYWORDS_NORMALIZED.some((keyword, index) => {
-    if (!keyword) return false;
-    if (normalized.includes(keyword)) return true;
-    const compactKeyword = VIP_HIGHLIGHT_KEYWORDS_COMPACT[index];
-    return compactKeyword ? compact.includes(compactKeyword) : false;
-  });
-}
-
-function matchesVipQuery(vipCategory: string | number | null | undefined, query: string): boolean {
+function matchesLocationQuery(locationCategory: string | number | null | undefined, query: string): boolean {
   if (!query.trim()) return false;
-  if (!vipCategory) return false;
+  if (locationCategory == null) return false;
 
-  const normalizedCategory = normalizeText(String(vipCategory));
+  const normalizedCategory = String(locationCategory).trim().toLowerCase();
   if (!normalizedCategory) return false;
 
-  const queryWords = normalizeText(query).split(/\s+/).filter(Boolean);
-  if (queryWords.length === 0) return false;
-
-  // All query words must be present (AND logic)
-  return queryWords.every((word) => normalizedCategory.includes(word));
+  const normalizedQuery = query.trim().toLowerCase();
+  // Partial match (case-insensitive)
+  return normalizedCategory.includes(normalizedQuery);
 }
 
 function createColoredPinIcon(color: string, highlighted = false): L.DivIcon {
@@ -250,7 +240,7 @@ function createColoredPinIcon(color: string, highlighted = false): L.DivIcon {
 
   return L.divIcon({
     html: svg,
-    className: highlighted ? "hajj-site-pin vip-highlight" : "hajj-site-pin",
+    className: highlighted ? "hajj-site-pin location-highlight" : "hajj-site-pin",
     iconSize: [28, 42],
     iconAnchor: [14, 42],
     popupAnchor: [0, -36],
@@ -281,49 +271,49 @@ export default function HajjSitesPlannerMap({
   markerColorBySiteId,
   markerOpacityBySiteId,
   onClusterMarkerClick,
-  vipQuery: externalVipQuery,
-  vipFilterActive: externalVipFilterActive,
-  onVipQueryChange,
-  onVipFilterApply,
-  onVipFilterClear,
-  vipMatchCount: externalVipMatchCount,
+  locationQuery: externalLocationQuery,
+  locationFilterActive: externalLocationFilterActive,
+  onLocationQueryChange,
+  onLocationFilterApply,
+  onLocationFilterClear,
+  locationMatchCount: externalLocationMatchCount,
 }: HajjSitesPlannerMapProps) {
   const isClusterMode = mode === "cluster";
 
-  // Internal VIP state (used when external props not provided)
-  const [internalVipQuery, setInternalVipQuery] = useState("");
-  const [internalVipFilterActive, setInternalVipFilterActive] = useState(false);
+  // Internal Location_Category search state (used when external props not provided)
+  const [internalLocationQuery, setInternalLocationQuery] = useState("");
+  const [internalLocationFilterActive, setInternalLocationFilterActive] = useState(false);
 
   // Use external or internal state
-  const vipQuery = externalVipQuery ?? internalVipQuery;
-  const vipFilterActive = externalVipFilterActive ?? internalVipFilterActive;
+  const locationQuery = externalLocationQuery ?? internalLocationQuery;
+  const locationFilterActive = externalLocationFilterActive ?? internalLocationFilterActive;
 
-  const handleVipQueryChange = useCallback(
+  const handleLocationQueryChange = useCallback(
     (query: string) => {
-      if (onVipQueryChange) {
-        onVipQueryChange(query);
+      if (onLocationQueryChange) {
+        onLocationQueryChange(query);
       } else {
-        setInternalVipQuery(query);
+        setInternalLocationQuery(query);
       }
     },
-    [onVipQueryChange]
+    [onLocationQueryChange]
   );
 
-  const handleVipFilterApply = useCallback(() => {
-    if (onVipFilterApply) {
-      onVipFilterApply();
+  const handleLocationFilterApply = useCallback(() => {
+    if (onLocationFilterApply) {
+      onLocationFilterApply();
     } else {
-      setInternalVipFilterActive(true);
+      setInternalLocationFilterActive(true);
     }
-  }, [onVipFilterApply]);
+  }, [onLocationFilterApply]);
 
-  const handleVipFilterClear = useCallback(() => {
-    if (onVipFilterClear) {
-      onVipFilterClear();
+  const handleLocationFilterClear = useCallback(() => {
+    if (onLocationFilterClear) {
+      onLocationFilterClear();
     } else {
-      setInternalVipFilterActive(false);
+      setInternalLocationFilterActive(false);
     }
-  }, [onVipFilterClear]);
+  }, [onLocationFilterClear]);
 
   const [selectedArea, setSelectedArea] = useState<string | null>(null);
   const [selectedConnection, setSelectedConnection] = useState<{
@@ -334,9 +324,9 @@ export default function HajjSitesPlannerMap({
   const [feConnectionMode, setFeConnectionMode] = useState<FeConnectionMode>("ON_CLICK");
   const [selectedHubFeId, setSelectedHubFeId] = useState<string | null>(null);
 
-  // Track when VIP filter is first applied to trigger fit bounds
-  const [shouldFitVipBounds, setShouldFitVipBounds] = useState(false);
-  const prevVipFilterActiveRef = useRef(vipFilterActive);
+  // Track when Location filter is first applied to trigger fit bounds
+  const [shouldFitLocationBounds, setShouldFitLocationBounds] = useState(false);
+  const prevLocationFilterActiveRef = useRef(locationFilterActive);
 
   const points = useMemo(() => {
     return sites
@@ -351,9 +341,9 @@ export default function HajjSitesPlannerMap({
           : `row-${index}`;
         const areaKey = getAreaKey(row["Area"]);
         const areaLabel = getAreaLabel(areaKey);
-        const vipHighlighted = isVipHighlighted(row["VIP_Category"]);
+        const locationHighlighted = isHighlightedLocationCategory(row["Location_Category"]);
 
-        return { key, lat, lng, row, areaKey, areaLabel, vipHighlighted } as MapPoint;
+        return { key, lat, lng, row, areaKey, areaLabel, locationHighlighted } as MapPoint;
       })
       .filter((point): point is MapPoint => point != null);
   }, [sites]);
@@ -392,41 +382,41 @@ export default function HajjSitesPlannerMap({
     return hubSites;
   }, [areaFilteredPoints, points, selectedHubFeId, isClusterMode]);
 
-  // Precompute VIP matches for current query (before filter is applied)
-  const vipMatchedSiteKeys = useMemo(() => {
-    if (!vipQuery.trim()) return new Set<string>();
+  // Precompute Location_Category matches for current query (before filter is applied)
+  const locationMatchedSiteKeys = useMemo(() => {
+    if (!locationQuery.trim()) return new Set<string>();
     const matched = new Set<string>();
     for (const point of points) {
-      if (matchesVipQuery(point.row["VIP_Category"], vipQuery)) {
+      if (matchesLocationQuery(point.row["Location_Category"], locationQuery)) {
         matched.add(point.key);
       }
     }
     return matched;
-  }, [vipQuery, points]);
+  }, [locationQuery, points]);
 
-  const vipMatchCount = externalVipMatchCount ?? vipMatchedSiteKeys.size;
+  const locationMatchCount = externalLocationMatchCount ?? locationMatchedSiteKeys.size;
 
-  // Apply VIP filter on top of existing filters
-  const vipFilteredPoints = useMemo(() => {
-    if (!vipFilterActive) return filteredPoints;
-    return filteredPoints.filter((point) => vipMatchedSiteKeys.has(point.key));
-  }, [filteredPoints, vipFilterActive, vipMatchedSiteKeys]);
+  // Apply Location_Category filter on top of existing filters
+  const locationFilteredPoints = useMemo(() => {
+    if (!locationFilterActive) return filteredPoints;
+    return filteredPoints.filter((point) => locationMatchedSiteKeys.has(point.key));
+  }, [filteredPoints, locationFilterActive, locationMatchedSiteKeys]);
 
-  // Track VIP filter activation for fit bounds
+  // Track Location filter activation for fit bounds
   useEffect(() => {
-    if (vipFilterActive && !prevVipFilterActiveRef.current) {
-      setShouldFitVipBounds(true);
+    if (locationFilterActive && !prevLocationFilterActiveRef.current) {
+      setShouldFitLocationBounds(true);
     }
-    prevVipFilterActiveRef.current = vipFilterActive;
-  }, [vipFilterActive]);
+    prevLocationFilterActiveRef.current = locationFilterActive;
+  }, [locationFilterActive]);
 
   // Reset fit bounds flag after it's been consumed
   useEffect(() => {
-    if (shouldFitVipBounds) {
-      const timer = setTimeout(() => setShouldFitVipBounds(false), 100);
+    if (shouldFitLocationBounds) {
+      const timer = setTimeout(() => setShouldFitLocationBounds(false), 100);
       return () => clearTimeout(timer);
     }
-  }, [shouldFitVipBounds]);
+  }, [shouldFitLocationBounds]);
 
   const siteLookup = useMemo(() => {
     const lookup = new Map<string, MapPoint>();
@@ -532,21 +522,21 @@ export default function HajjSitesPlannerMap({
   const visibleConnection = useMemo(() => {
     if (isClusterMode) return null;
     if (!selectedConnection) return null;
-    const fromVisible = vipFilteredPoints.some((point) => point.key === selectedConnection.from.key);
+    const fromVisible = locationFilteredPoints.some((point) => point.key === selectedConnection.from.key);
     if (!fromVisible) return null;
     return selectedConnection;
-  }, [vipFilteredPoints, selectedConnection, isClusterMode]);
+  }, [locationFilteredPoints, selectedConnection, isClusterMode]);
 
   const visibleFeConnections = useMemo(() => {
     if (isClusterMode) return [];
     if (feConnectionMode !== "SHOW_ALL") return [];
-    const visibleFromKeys = new Set(vipFilteredPoints.map((point) => point.key));
+    const visibleFromKeys = new Set(locationFilteredPoints.map((point) => point.key));
     return allFeConnections.filter((connection) => {
       if (!visibleFromKeys.has(connection.from.key)) return false;
       if (!selectedHubFeId) return true;
       return connection.feIdNormalized === normalizeSiteId(selectedHubFeId);
     });
-  }, [allFeConnections, feConnectionMode, vipFilteredPoints, selectedHubFeId, isClusterMode]);
+  }, [allFeConnections, feConnectionMode, locationFilteredPoints, selectedHubFeId, isClusterMode]);
 
   const hubCounts = useMemo(() => {
     // Hub FE counts are computed dynamically from the current dataset.
@@ -615,17 +605,17 @@ export default function HajjSitesPlannerMap({
           z-index: 1;
           display: block;
         }
-        .hajj-site-pin.vip-highlight::before {
+        .hajj-site-pin.location-highlight::before {
           content: "";
           position: absolute;
           inset: -6px;
           border-radius: 999px;
           box-shadow: 0 0 12px 6px rgba(255, 215, 0, 0.85);
           opacity: 0.9;
-          animation: vip-pulse 2s ease-in-out infinite;
+          animation: location-pulse 2s ease-in-out infinite;
           z-index: 0;
         }
-        @keyframes vip-pulse {
+        @keyframes location-pulse {
           0%, 100% {
             transform: scale(0.9);
             opacity: 0.6;
@@ -659,7 +649,7 @@ export default function HajjSitesPlannerMap({
               url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
             />
 
-            {vipFilteredPoints.length > 0 && <MapAutoFit points={vipFilteredPoints} key={shouldFitVipBounds ? 'vip-fit' : 'normal'} />}
+            {locationFilteredPoints.length > 0 && <MapAutoFit points={locationFilteredPoints} key={shouldFitLocationBounds ? 'location-fit' : 'normal'} />}
 
             {feConnectionMode === "ON_CLICK" && visibleConnection && (
               <Pane name="fe-connections" style={{ zIndex: 2000 }}>
@@ -690,7 +680,7 @@ export default function HajjSitesPlannerMap({
               </Pane>
             )}
 
-            {vipFilteredPoints.map((point) => {
+            {locationFilteredPoints.map((point) => {
               const siteIdRaw = point.row["Site ID"] ? String(point.row["Site ID"]).trim() : "";
               const normalizedSiteId = normalizeSiteId(siteIdRaw);
               const overrideColor =
@@ -704,7 +694,7 @@ export default function HajjSitesPlannerMap({
               const markerOpacity = typeof overrideOpacity === 'number' ? overrideOpacity : 1;
               const areaColor = getAreaColor(point.areaKey);
               const markerColor = overrideColor ?? areaColor;
-              const icon = getIconForColor(markerColor, point.vipHighlighted);
+              const icon = getIconForColor(markerColor, point.locationHighlighted);
 
               return (
                 <Marker
@@ -740,6 +730,12 @@ export default function HajjSitesPlannerMap({
                       </div>
                       <div className="text-slate-600">
                         {point.row["FE ID"] ?? "-"}
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Location:</span> {point.row["Location"] ?? "-"}
+                      </div>
+                      <div>
+                        <span className="text-slate-500">Location_Category:</span> {point.row["Location_Category"] ?? "-"}
                       </div>
                       <div>
                         <span className="text-slate-500">Area:</span> {point.row["Area"] ?? "-"}
@@ -804,55 +800,73 @@ export default function HajjSitesPlannerMap({
               </div>
             </div>
 
-            {/* VIP Search Row */}
-            <div className="flex items-center gap-3 mt-2 pt-2 border-t border-slate-100">
-              <div className="flex items-center gap-2 flex-1 max-w-md">
-                <input
-                  type="text"
-                  value={vipQuery}
-                  onChange={(e) => handleVipQueryChange(e.target.value)}
-                  placeholder="Search VIP_Category… (e.g., hospital, critical, train)"
-                  className="flex-1 px-2 py-1 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <span className="text-xs text-slate-500 whitespace-nowrap">
-                  Matched:{" "}
-                  {vipQuery.trim() && vipMatchCount > 0 ? (
+            {/* Location_Category Search Row */}
+            <div className="flex flex-col gap-2 mt-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-slate-600">Quick filters:</span>
+                {LOCATION_CATEGORY_CHIPS.map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => {
+                      handleLocationQueryChange(chip);
+                      handleLocationFilterApply();
+                    }}
+                    className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-xs hover:bg-amber-200 transition"
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 flex-1 max-w-md">
+                  <input
+                    type="text"
+                    value={locationQuery}
+                    onChange={(e) => handleLocationQueryChange(e.target.value)}
+                    placeholder="Search Location_Category… (e.g., jamarat, hospital, train)"
+                    className="flex-1 px-2 py-1 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <span className="text-xs text-slate-500 whitespace-nowrap">
+                    Matched:{" "}
+                    {locationQuery.trim() && locationMatchCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={handleLocationFilterApply}
+                        className="font-semibold text-blue-600 hover:underline"
+                      >
+                        {locationMatchCount}
+                      </button>
+                    ) : (
+                      <span>{locationMatchCount}</span>
+                    )}
+                  </span>
+                  {locationQuery.trim() && locationMatchCount > 0 && !locationFilterActive && (
                     <button
                       type="button"
-                      onClick={handleVipFilterApply}
-                      className="font-semibold text-blue-600 hover:underline"
+                      onClick={handleLocationFilterApply}
+                      className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition"
                     >
-                      {vipMatchCount}
+                      Show on Map
                     </button>
-                  ) : (
-                    <span>{vipMatchCount}</span>
                   )}
-                </span>
-                {vipQuery.trim() && vipMatchCount > 0 && !vipFilterActive && (
-                  <button
-                    type="button"
-                    onClick={handleVipFilterApply}
-                    className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition"
-                  >
-                    Apply
-                  </button>
-                )}
-                {vipFilterActive && (
-                  <button
-                    type="button"
-                    onClick={handleVipFilterClear}
-                    className="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium hover:bg-red-200 transition flex items-center gap-1"
-                  >
-                    <span>✕</span>
-                    <span>Clear VIP filter</span>
-                  </button>
+                  {locationFilterActive && (
+                    <button
+                      type="button"
+                      onClick={handleLocationFilterClear}
+                      className="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium hover:bg-red-200 transition flex items-center gap-1"
+                    >
+                      <span>✕</span>
+                      <span>Clear filter</span>
+                    </button>
+                  )}
+                </div>
+                {locationFilterActive && (
+                  <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+                    Location filter: "{locationQuery}" ({locationFilteredPoints.length} sites)
+                  </span>
                 )}
               </div>
-              {vipFilterActive && (
-                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
-                  VIP filter: "{vipQuery}" ({vipFilteredPoints.length} sites)
-                </span>
-              )}
             </div>
 
             <div className="flex items-center justify-between gap-3 mt-2 pt-2 border-t border-slate-100 flex-wrap">
@@ -933,67 +947,85 @@ export default function HajjSitesPlannerMap({
                   </div>
                 </div>
                 <span>
-                  Showing {vipFilteredPoints.length} of {points.length} sites
+                  Showing {locationFilteredPoints.length} of {points.length} sites
                 </span>
               </div>
             </div>
           </div>
         )}
 
-        {/* Cluster Mode VIP Controls */}
+        {/* Cluster Mode Location_Category Controls */}
         {isClusterMode && (
           <div className="border-t border-slate-200 bg-white px-3 py-2 text-xs text-slate-600">
-            <div className="flex items-center gap-3 flex-wrap">
-              <div className="flex items-center gap-2 flex-1 max-w-md">
-                <input
-                  type="text"
-                  value={vipQuery}
-                  onChange={(e) => handleVipQueryChange(e.target.value)}
-                  placeholder="Search VIP_Category… (e.g., hospital, critical, train)"
-                  className="flex-1 px-2 py-1 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-                />
-                <span className="text-xs text-slate-500 whitespace-nowrap">
-                  Matched:{" "}
-                  {vipQuery.trim() && vipMatchCount > 0 ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-slate-600">Quick filters:</span>
+                {LOCATION_CATEGORY_CHIPS.map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    onClick={() => {
+                      handleLocationQueryChange(chip);
+                      handleLocationFilterApply();
+                    }}
+                    className="px-2 py-0.5 bg-amber-100 text-amber-800 rounded text-xs hover:bg-amber-200 transition"
+                  >
+                    {chip}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-1 max-w-md">
+                  <input
+                    type="text"
+                    value={locationQuery}
+                    onChange={(e) => handleLocationQueryChange(e.target.value)}
+                    placeholder="Search Location_Category… (e.g., jamarat, hospital, train)"
+                    className="flex-1 px-2 py-1 border border-slate-300 rounded-md text-xs focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                  />
+                  <span className="text-xs text-slate-500 whitespace-nowrap">
+                    Matched:{" "}
+                    {locationQuery.trim() && locationMatchCount > 0 ? (
+                      <button
+                        type="button"
+                        onClick={handleLocationFilterApply}
+                        className="font-semibold text-blue-600 hover:underline"
+                      >
+                        {locationMatchCount}
+                      </button>
+                    ) : (
+                      <span>{locationMatchCount}</span>
+                    )}
+                  </span>
+                  {locationQuery.trim() && locationMatchCount > 0 && !locationFilterActive && (
                     <button
                       type="button"
-                      onClick={handleVipFilterApply}
-                      className="font-semibold text-blue-600 hover:underline"
+                      onClick={handleLocationFilterApply}
+                      className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition"
                     >
-                      {vipMatchCount}
+                      Show on Map
                     </button>
-                  ) : (
-                    <span>{vipMatchCount}</span>
                   )}
+                  {locationFilterActive && (
+                    <button
+                      type="button"
+                      onClick={handleLocationFilterClear}
+                      className="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium hover:bg-red-200 transition flex items-center gap-1"
+                    >
+                      <span>✕</span>
+                      <span>Clear filter</span>
+                    </button>
+                  )}
+                </div>
+                {locationFilterActive && (
+                  <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
+                    Location filter: "{locationQuery}" ({locationFilteredPoints.length} sites)
+                  </span>
+                )}
+                <span className="text-xs text-slate-500 ml-auto">
+                  Showing {locationFilteredPoints.length} of {points.length} sites
                 </span>
-                {vipQuery.trim() && vipMatchCount > 0 && !vipFilterActive && (
-                  <button
-                    type="button"
-                    onClick={handleVipFilterApply}
-                    className="px-2 py-1 bg-blue-600 text-white rounded-md text-xs font-medium hover:bg-blue-700 transition"
-                  >
-                    Apply
-                  </button>
-                )}
-                {vipFilterActive && (
-                  <button
-                    type="button"
-                    onClick={handleVipFilterClear}
-                    className="px-2 py-1 bg-red-100 text-red-700 rounded-md text-xs font-medium hover:bg-red-200 transition flex items-center gap-1"
-                  >
-                    <span>✕</span>
-                    <span>Clear VIP filter</span>
-                  </button>
-                )}
               </div>
-              {vipFilterActive && (
-                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-md">
-                  VIP filter: "{vipQuery}" ({vipFilteredPoints.length} sites)
-                </span>
-              )}
-              <span className="text-xs text-slate-500 ml-auto">
-                Showing {vipFilteredPoints.length} of {points.length} sites
-              </span>
             </div>
           </div>
         )}

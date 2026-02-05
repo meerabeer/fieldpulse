@@ -51,7 +51,16 @@ const REQUIRED_COLUMNS = [
   "Modules_Status",
   "Rectifier_Data",
   "Reftifier_Status",
+  "Location_Category",
 ] as const;
+
+// Header variations for Location_Category
+const LOCATION_CATEGORY_VARIANTS = [
+  "Location_Category",
+  "Location Category",
+  "location_category",
+  "LocationCategory",
+];
 
 type HajjSiteRow = Record<string, string | number | null>;
 
@@ -68,10 +77,24 @@ function parseCoordinate(value: unknown): number | null {
   return null;
 }
 
+function findLocationCategory(row: Record<string, unknown>): string | number | null {
+  for (const variant of LOCATION_CATEGORY_VARIANTS) {
+    if (variant in row && row[variant] != null) {
+      return row[variant] as string | number;
+    }
+  }
+  return null;
+}
+
 function normalizeRow(row: Record<string, unknown>): HajjSiteRow | null {
   const normalized: HajjSiteRow = {};
 
   for (const column of REQUIRED_COLUMNS) {
+    // Special handling for Location_Category with header variations
+    if (column === "Location_Category") {
+      normalized[column] = findLocationCategory(row);
+      continue;
+    }
     const value = row[column];
     normalized[column] = value == null ? null : (value as string | number);
   }
