@@ -526,10 +526,75 @@ function escapeCsvField(value: string): string {
   return value;
 }
 
-function buildClusterCsv(rows: ClusteredSite[], hasVipGroup: boolean): string {
+
+function buildClusterCsv(
+  rows: ClusteredSite[],
+  hasVipGroup: boolean,
+  startDate: string,
+  endDate: string,
+  maxSitesPerDay: number
+): string {
+  // 1. Get workdays (excluding Fridays)
+  const workdays: string[] = [];
+  let current = new Date(startDate);
+  const end = new Date(endDate);
+
+  while (current <= end) {
+    // Friday is 5 (0 is Sunday)
+    if (current.getDay() !== 5) {
+      workdays.push(current.toISOString().split("T")[0]);
+    }
+    current.setDate(current.getDate() + 1);
+  }
+
+  // 2. Group by cluster index to schedule each NFO independently
+  const groups = new Map<number, ClusteredSite[]>();
+  for (const row of rows) {
+    if (!groups.has(row.clusterIndex)) {
+      groups.set(row.clusterIndex, []);
+    }
+    groups.get(row.clusterIndex)?.push(row);
+  }
+
+  // 3. Build scheduled rows
+  const scheduledRows: Array<{ site: ClusteredSite, date: string }> = [];
+
+  // Sort groups to ensure consistent ordering
+  const sortedGroupIds = Array.from(groups.keys()).sort((a, b) => a - b);
+
+  for (const groupId of sortedGroupIds) {
+    const groupSites = groups.get(groupId)!;
+
+    // Sort sites within group by ID for consistent scheduling
+    groupSites.sort((a, b) => a.point.siteId.localeCompare(b.point.siteId));
+
+    let siteIndex = 0;
+
+    // Assign to workdays
+    for (const date of workdays) {
+      for (let i = 0; i < maxSitesPerDay && siteIndex < groupSites.length; i++) {
+        scheduledRows.push({
+          site: groupSites[siteIndex],
+          date: date
+        });
+        siteIndex++;
+      }
+    }
+
+    // Handle remaining unscheduled sites
+    while (siteIndex < groupSites.length) {
+      scheduledRows.push({
+        site: groupSites[siteIndex],
+        date: "Unscheduled/Capacity Reached"
+      });
+      siteIndex++;
+    }
+  }
+
   const headers = [
     "Site ID",
     "NFO Name",
+    "Planned Date",
     "FE ID",
     "Technology",
     "Latitude",
@@ -541,15 +606,19 @@ function buildClusterCsv(rows: ClusteredSite[], hasVipGroup: boolean): string {
     "VIP_Category",
     "Site_Type_Category",
   ];
-  const lines = rows.map(({ point, clusterIndex }) => {
+
+  const lines = scheduledRows.map(({ site, date }) => {
+    const { point, clusterIndex } = site;
     const groupNumber = clusterIndex + 1;
     // If there's a VIP group, group 0 is "VIP NFO", others are "NFO 2", "NFO 3", etc.
-    const nfoName = hasVipGroup && clusterIndex === 0 
-      ? "VIP NFO" 
+    const nfoName = hasVipGroup && clusterIndex === 0
+      ? "VIP NFO"
       : `NFO ${groupNumber}`;
+
     const row: Record<string, string> = {
       "Site ID": point.siteId || "",
       "NFO Name": nfoName,
+      "Planned Date": date,
       "FE ID": point.row["FE ID"] ? String(point.row["FE ID"]) : "",
       "Technology": point.row["Technology"] ? String(point.row["Technology"]) : "",
       "Latitude": Number.isFinite(point.lat) ? String(point.lat) : "",
@@ -600,6 +669,20 @@ export default function HajjSitesPlanner() {
   const [clusterError, setClusterError] = useState<string | null>(null);
   const [clusterKUsed, setClusterKUsed] = useState<number | null>(null);
   const [hasVipGroup, setHasVipGroup] = useState(false);
+
+  // Planning options
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 1); // Default start tomorrow
+    return d.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 7); // Default 1 week range
+    return d.toISOString().split('T')[0];
+  });
+  const [maxSitesPerDay, setMaxSitesPerDay] = useState(10);
+
   const clusterDebugRef = useRef<ClusterDebugState | null>(null);
 
   const appendStatus = useCallback((line: string) => {
@@ -947,7 +1030,7 @@ export default function HajjSitesPlanner() {
     // Separate VIP (highlighted) sites from normal sites
     const vipSites: ClusterPoint[] = [];
     const normalSites: ClusterPoint[] = [];
-    
+
     for (const point of matched) {
       if (isHighlightedLocationCategory(point.row["Location_Category"])) {
         vipSites.push(point);
@@ -965,7 +1048,7 @@ export default function HajjSitesPlanner() {
       // Cluster normal sites with K-1 groups, then offset their indices by 1
       setHasVipGroup(true);
       const normalK = usedK - 1;
-      
+
       if (normalSites.length === 0) {
         // All sites are VIP - assign all to group 0
         clustered = vipSites.map((point) => ({
@@ -993,29 +1076,29 @@ export default function HajjSitesPlanner() {
       } else {
         // Cluster normal sites with K-1 groups
         const normalResult = runBalancedClustering(normalSites, normalK, 2);
-        
+
         // Build clustered array: VIP sites get index 0, normal sites get offset indices (1, 2, 3...)
         const vipClustered = vipSites.map((point) => ({
           point,
           clusterIndex: 0, // VIP NFO is always group 0
         }));
-        
+
         const normalClustered = normalSites.map((point, index) => ({
           point,
           clusterIndex: (normalResult.assignments[index] ?? 0) + 1, // Offset by 1
         }));
-        
+
         clustered = [...vipClustered, ...normalClustered];
-        
+
         // Compute VIP centroid
         const vipCentroid = {
           lat: vipSites.reduce((sum, p) => sum + p.lat, 0) / vipSites.length,
           lng: vipSites.reduce((sum, p) => sum + p.lng, 0) / vipSites.length,
         };
-        
+
         // Combine centroids: VIP centroid first, then normal centroids
         finalCentroids = [vipCentroid, ...normalResult.centroids];
-        
+
         // Build assignments array in original matched order
         const vipAssignments = vipSites.map(() => 0);
         const normalAssignments = normalResult.assignments.map((a) => a + 1);
@@ -1066,16 +1149,18 @@ export default function HajjSitesPlanner() {
 
   const handleClusterExport = useCallback(() => {
     if (clusteredSites.length === 0) return;
-    const sorted = [...clusteredSites].sort((a, b) => {
-      if (a.clusterIndex !== b.clusterIndex) {
-        return a.clusterIndex - b.clusterIndex;
-      }
-      return a.point.siteId.localeCompare(b.point.siteId);
-    });
-    const csvContent = buildClusterCsv(sorted, hasVipGroup);
+    // Sort handled inside buildClusterCsv now for scheduling purposes, 
+    // but we pass all sites
+    const csvContent = buildClusterCsv(
+      clusteredSites,
+      hasVipGroup,
+      startDate,
+      endDate,
+      maxSitesPerDay
+    );
     const suffix = clusterKUsed ? `_K${clusterKUsed}` : "";
     downloadCsv(csvContent, `hajj_sites_planner_clusters${suffix}.csv`);
-  }, [clusterKUsed, clusteredSites, hasVipGroup]);
+  }, [clusterKUsed, clusteredSites, hasVipGroup, startDate, endDate, maxSitesPerDay]);
 
   return (
     <div className="space-y-6">
@@ -1083,22 +1168,20 @@ export default function HajjSitesPlanner() {
         <button
           type="button"
           onClick={() => setActiveTab("planner")}
-          className={`px-3 py-1.5 rounded-md text-sm font-medium border transition ${
-            activeTab === "planner"
-              ? "bg-slate-900 text-white border-slate-900"
-              : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-          }`}
+          className={`px-3 py-1.5 rounded-md text-sm font-medium border transition ${activeTab === "planner"
+            ? "bg-slate-900 text-white border-slate-900"
+            : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+            }`}
         >
           Upload & Map
         </button>
         <button
           type="button"
           onClick={() => setActiveTab("cluster")}
-          className={`px-3 py-1.5 rounded-md text-sm font-medium border transition ${
-            activeTab === "cluster"
-              ? "bg-slate-900 text-white border-slate-900"
-              : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
-          }`}
+          className={`px-3 py-1.5 rounded-md text-sm font-medium border transition ${activeTab === "cluster"
+            ? "bg-slate-900 text-white border-slate-900"
+            : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50"
+            }`}
         >
           Cluster Planner
         </button>
@@ -1260,6 +1343,44 @@ export default function HajjSitesPlanner() {
                 )}
               </div>
             )}
+
+            {/* Planning Options */}
+            <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  Start Date
+                </label>
+                <input
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  End Date
+                </label>
+                <input
+                  type="date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  className="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">
+                  Max Sites/Day/NFO
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  value={maxSitesPerDay}
+                  onChange={(e) => setMaxSitesPerDay(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+            </div>
           </section>
 
           {clusteredSites.length > 0 && (
@@ -1283,19 +1404,18 @@ export default function HajjSitesPlanner() {
                         onClick={() =>
                           setSelectedClusterIndex((prev) => (prev === item.index ? null : item.index))
                         }
-                        className={`flex items-center gap-1 text-xs rounded-md border px-2 py-1 transition ${
-                          isSelected
-                            ? "bg-slate-900 text-white border-slate-900"
-                            : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
-                        }`}
+                        className={`flex items-center gap-1 text-xs rounded-md border px-2 py-1 transition ${isSelected
+                          ? "bg-slate-900 text-white border-slate-900"
+                          : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                          }`}
                       >
                         <span
                           className="inline-block h-2.5 w-2.5 rounded-full"
                           style={{ backgroundColor: item.color }}
                         />
                         <span>
-                          {hasVipGroup && item.index === 0 
-                            ? `VIP NFO (${item.count})` 
+                          {hasVipGroup && item.index === 0
+                            ? `VIP NFO (${item.count})`
                             : `NFO ${item.index + 1} (${item.count})`}
                         </span>
                       </button>
@@ -1372,7 +1492,8 @@ export default function HajjSitesPlanner() {
               </section>
             )}
         </>
-      )}
-    </div>
+      )
+      }
+    </div >
   );
 }

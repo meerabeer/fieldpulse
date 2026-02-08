@@ -133,15 +133,14 @@ function sanitizeFilename(name: string): string {
 
 // Generate CSV content from site data
 function generateCsvContent(sites: SiteWithOwner[]): string {
-    const headers = ["cluster_owner", "site_id", "site_name", "area", "latitude", "longitude"];
-    const rows = sites.map((site) => {
-        const owner = site.cluster_owner || "Unassigned";
-        const name = site.site_name || "";
-        const area = site.area || "";
-        const lat = site.latitude != null ? String(site.latitude) : "";
-        const lng = site.longitude != null ? String(site.longitude) : "";
+    const headers = ["site_id", "site_name", "area", "latitude", "longitude", "cluster_owner"];
+    const rows = sites.map((row) => {
+        const name = row.site_name || "";
+        const area = row.area || "";
+        const lat = row.latitude != null ? String(row.latitude) : "";
+        const lng = row.longitude != null ? String(row.longitude) : "";
+        const owner = row.cluster_owner || "Unassigned";
 
-        // Escape fields that contain commas or quotes
         const escapeField = (value: string) => {
             if (value.includes(",") || value.includes('"') || value.includes("\n")) {
                 return `"${value.replace(/"/g, '""')}"`;
@@ -149,7 +148,7 @@ function generateCsvContent(sites: SiteWithOwner[]): string {
             return value;
         };
 
-        return [owner, site.site_id, name, area, lat, lng].map(escapeField).join(",");
+        return [row.site_id, name, area, lat, lng, owner].map(escapeField).join(",");
     });
 
     return [headers.join(","), ...rows].join("\n");
@@ -176,6 +175,8 @@ export default function ClusterPlanner() {
     const [selectedOwner, setSelectedOwner] = useState<string | null>(null);
     const [parseStats, setParseStats] = useState<ParseStats | null>(null);
     const [error, setError] = useState<string | null>(null);
+
+    // Planning Options State
 
     // Get unique owners from site data
     const uniqueOwners = useMemo(() => {
@@ -318,9 +319,10 @@ export default function ClusterPlanner() {
             : siteData;
 
         const csvContent = generateCsvContent(exportData);
+
         const filename = selectedOwner
-            ? `cluster_planner_${sanitizeFilename(selectedOwner)}.csv`
-            : "cluster_planner_ALL.csv";
+            ? `cluster_owner_${sanitizeFilename(selectedOwner)}.csv`
+            : "cluster_planner_all.csv";
 
         downloadCsv(csvContent, filename);
     }, [siteData, selectedOwner]);
@@ -368,6 +370,7 @@ export default function ClusterPlanner() {
                         Download CSV
                     </button>
                 </div>
+
 
                 {/* Error message */}
                 {error && (
