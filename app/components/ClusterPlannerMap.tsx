@@ -21,9 +21,14 @@ interface ClusterPlannerMapProps {
   onSiteClick?: (site: SiteWithOwner) => void;
 }
 
-// Create a custom colored pin marker using SVG
-function createColoredPinIcon(color: string): L.DivIcon {
-  // SVG marker pin with dynamic fill color
+// Create a custom colored pin marker using SVG with site ID text
+function createColoredPinIcon(color: string, siteId: string): L.DivIcon {
+  // Calculate text width for dynamic background sizing
+  const textLength = siteId.length;
+  const rectWidth = Math.max(14, textLength * 5.5);
+  const rectX = 12 - rectWidth / 2;
+
+  // SVG marker pin with dynamic fill color and prominent white label for site ID
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 36" width="28" height="42">
       <defs>
@@ -33,7 +38,8 @@ function createColoredPinIcon(color: string): L.DivIcon {
       </defs>
       <path fill="${color}" stroke="#ffffff" stroke-width="1.5" filter="url(#shadow)"
         d="M12 0C5.4 0 0 5.4 0 12c0 7.2 10.8 22.4 11.4 23.2.3.4.9.4 1.2 0C13.2 34.4 24 19.2 24 12c0-6.6-5.4-12-12-12z"/>
-      <circle cx="12" cy="12" r="5" fill="#ffffff" opacity="0.9"/>
+      <rect x="${rectX}" y="7" width="${rectWidth}" height="10" rx="2" ry="2" fill="#ffffff" opacity="0.95"/>
+      <text x="12" y="14.5" text-anchor="middle" font-size="7.5" font-weight="bold" fill="#333333" font-family="Arial, sans-serif">${siteId}</text>
     </svg>
   `;
 
@@ -97,25 +103,27 @@ export default function ClusterPlannerMap({
     );
   }, [displaySites]);
 
-  // Create icon cache per color for performance
+  // Create icon cache per site for performance (each site has unique ID)
   const iconCache = useMemo(() => {
     const cache = new Map<string, L.DivIcon>();
-    // Pre-create icons for all owner colors
-    ownerColors.forEach((color, owner) => {
-      cache.set(owner, createColoredPinIcon(color));
+    // Pre-create icons for all sites with coordinates
+    sitesWithCoords.forEach((site) => {
+      const owner = site.cluster_owner || "Unassigned";
+      const color = ownerColors.get(owner) || "hsl(0, 0%, 50%)";
+      cache.set(site.site_id, createColoredPinIcon(color, site.site_id));
     });
     return cache;
-  }, [ownerColors]);
+  }, [sitesWithCoords, ownerColors]);
 
-  // Get icon for a site based on its owner
+  // Get icon for a site based on its ID
   const getIconForSite = (site: SiteWithOwner): L.DivIcon => {
-    const owner = site.cluster_owner || "Unassigned";
-    const cachedIcon = iconCache.get(owner);
+    const cachedIcon = iconCache.get(site.site_id);
     if (cachedIcon) return cachedIcon;
 
-    // Fallback: create new icon with the color
+    // Fallback: create new icon with the color and site ID
+    const owner = site.cluster_owner || "Unassigned";
     const color = ownerColors.get(owner) || "hsl(0, 0%, 50%)";
-    return createColoredPinIcon(color);
+    return createColoredPinIcon(color, site.site_id);
   };
 
   // Default center: Saudi Arabia
